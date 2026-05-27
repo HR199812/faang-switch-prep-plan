@@ -36,7 +36,7 @@ const GLOBAL_CSS = `
     background: var(--bg);
     color: var(--text);
     font-family: var(--font-sans);
-    font-size: 16px;
+    font-size: 18px;
     line-height: 1.5;
     overflow: hidden;
   }
@@ -61,14 +61,14 @@ const GLOBAL_CSS = `
   }
   .sidebar-logo h1 {
     font-family: var(--font-mono);
-    font-size: 14px;
+    font-size: 16px;
     font-weight: 700;
     letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--text);
   }
   .sidebar-logo p {
-    font-size: 12px;
+    font-size: 14px;
     color: var(--text3);
     margin-top: 2px;
     font-family: var(--font-mono);
@@ -82,7 +82,7 @@ const GLOBAL_CSS = `
 
   .nav-section {
     padding: 8px 14px 4px;
-    font-size: 11px;
+    font-size: 13px;
     font-family: var(--font-mono);
     letter-spacing: 0.15em;
     color: var(--text3);
@@ -101,7 +101,7 @@ const GLOBAL_CSS = `
     text-align: left;
     color: var(--text2);
     font-family: var(--font-sans);
-    font-size: 14px;
+    font-size: 16px;
     transition: all 0.12s;
     border-left: 2px solid transparent;
   }
@@ -109,7 +109,7 @@ const GLOBAL_CSS = `
   .nav-item.active { background: var(--bg3); color: var(--text); border-left-color: var(--item-color, var(--accent)); }
   .nav-item .week-num {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 14px;
     color: inherit;
     opacity: 0.7;
     min-width: 28px;
@@ -124,7 +124,7 @@ const GLOBAL_CSS = `
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 13px;
+    font-size: 15px;
   }
 
   /* Tabs */
@@ -138,7 +138,7 @@ const GLOBAL_CSS = `
   .tab-btn {
     padding: 10px 14px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 14px;
     font-weight: 500;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -171,7 +171,7 @@ const GLOBAL_CSS = `
   }
   .phase-badge {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 700;
     letter-spacing: 0.12em;
     text-transform: uppercase;
@@ -181,13 +181,13 @@ const GLOBAL_CSS = `
   }
   .week-title-main {
     font-family: var(--font-mono);
-    font-size: 22px;
+    font-size: 24px;
     font-weight: 700;
     color: var(--text);
     letter-spacing: -0.02em;
   }
   .week-goal {
-    font-size: 14px;
+    font-size: 16px;
     color: var(--text2);
     font-style: italic;
     margin-top: 3px;
@@ -211,7 +211,7 @@ const GLOBAL_CSS = `
   }
   .track-label-pill {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 700;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -220,12 +220,12 @@ const GLOBAL_CSS = `
   }
   .track-count {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 13px;
     color: var(--text3);
     margin-left: auto;
   }
   .track-chevron {
-    font-size: 10px;
+    font-size: 12px;
     color: var(--text3);
     transition: transform 0.15s;
   }
@@ -240,7 +240,7 @@ const GLOBAL_CSS = `
     align-items: flex-start;
     gap: 8px;
     padding: 5px 12px;
-    font-size: 14px;
+    font-size: 16px;
     color: var(--text2);
     line-height: 1.55;
     transition: background 0.1s;
@@ -267,8 +267,8 @@ const GLOBAL_CSS = `
   .hm-cell:hover { opacity: 0.7 !important; transform: scaleY(1.2); }
   .hm-empty { background: var(--bg2); cursor: default; }
   .hm-empty:hover { opacity: 1 !important; transform: none; }
-  .hm-label { font-size: 11px; color: var(--text3); display: flex; align-items: center; }
-  .hm-wk-label { font-size: 11px; color: var(--text3); text-align: center; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 2px; }
+  .hm-label { font-size: 13px; color: var(--text3); display: flex; align-items: center; }
+  .hm-wk-label { font-size: 13px; color: var(--text3); text-align: center; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 2px; }
 
   /* Daily schedule */
   .day-col {
@@ -283,8 +283,8 @@ const GLOBAL_CSS = `
     padding: 8px 10px 6px;
     border-bottom: 1px solid var(--border);
   }
-  .day-name { font-family: var(--font-mono); font-size: 13px; font-weight: 700; color: var(--text); }
-  .day-theme { font-size: 11px; color: var(--text3); margin-top: 1px; }
+  .day-name { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--text); }
+  .day-theme { font-size: 13px; color: var(--text3); margin-top: 1px; }
   .day-block {
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
@@ -293,8 +293,8 @@ const GLOBAL_CSS = `
     gap: 1px;
   }
   .day-block:last-child { border-bottom: none; }
-  .day-block-label { font-family: var(--font-mono); font-size: 12px; font-weight: 700; }
-  .day-block-mins { font-size: 11px; color: var(--text3); }
+  .day-block-label { font-family: var(--font-mono); font-size: 14px; font-weight: 700; }
+  .day-block-mins { font-size: 13px; color: var(--text3); }
 
   /* Milestone timeline */
   .milestone-row {
@@ -305,9 +305,9 @@ const GLOBAL_CSS = `
     align-items: flex-start;
   }
   .milestone-row:last-child { border-bottom: none; }
-  .milestone-wk { font-family: var(--font-mono); font-size: 12px; color: var(--text3); min-width: 48px; padding-top: 1px; }
+  .milestone-wk { font-family: var(--font-mono); font-size: 14px; color: var(--text3); min-width: 48px; padding-top: 1px; }
   .milestone-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
-  .milestone-text { font-size: 14px; color: var(--text); line-height: 1.5; }
+  .milestone-text { font-size: 16px; color: var(--text); line-height: 1.5; }
 
   /* Stats bar */
   .stats-row {
@@ -328,12 +328,12 @@ const GLOBAL_CSS = `
     border-right: 1px solid var(--border);
   }
   .stat-box:last-child { border-right: none; }
-  .stat-num { font-family: var(--font-mono); font-size: 24px; font-weight: 700; color: var(--text); }
-  .stat-label { font-size: 12px; color: var(--text3); }
+  .stat-num { font-family: var(--font-mono); font-size: 26px; font-weight: 700; color: var(--text); }
+  .stat-label { font-size: 14px; color: var(--text3); }
 
   /* Legend */
   .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--text2); }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 15px; color: var(--text2); }
   .legend-swatch { width: 10px; height: 10px; border-radius: 2px; }
 
   /* Checked item */
@@ -341,7 +341,7 @@ const GLOBAL_CSS = `
   .check-box {
     width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--border2);
     flex-shrink: 0; margin-top: 3px; cursor: pointer; display: flex; align-items: center; justify-content: center;
-    transition: all 0.1s; font-size: 10px; color: white;
+    transition: all 0.1s; font-size: 12px; color: white;
   }
   .check-box.done { background: var(--item-color, var(--border2)); border-color: var(--item-color, var(--border2)); }
 
