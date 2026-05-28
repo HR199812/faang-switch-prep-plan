@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { PHASES, TRACKS, WEEKS, MILESTONES, DAILY_BLOCKS } from "./data/weeks.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -354,6 +354,37 @@ const GLOBAL_CSS = `
 
   /* Scrollable sidebar weeks */
   .sidebar-weeks { flex: 1; overflow-y: auto; }
+
+  /* Streak log */
+  .streak-card {
+    margin-bottom: 14px;
+    border: 1px solid;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .streak-header {
+    padding: 10px 14px;
+    border-bottom: 1px solid;
+    display: flex;
+    align-items: center;
+  }
+  .streak-label {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .streak-stats { display: flex; gap: 20px; margin-left: auto; }
+  .streak-stat { display: flex; flex-direction: column; align-items: center; }
+  .streak-num { font-family: var(--font-mono); font-size: 22px; font-weight: 700; line-height: 1; }
+  .streak-sub { font-family: var(--font-mono); font-size: 10px; color: var(--text3); margin-top: 2px; }
+  .streak-cal { padding: 10px 14px; }
+  .streak-dow-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-bottom: 3px; }
+  .streak-dow { font-family: var(--font-mono); font-size: 9px; color: var(--text3); text-align: center; }
+  .streak-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+  .streak-day { height: 14px; border-radius: 2px; cursor: pointer; transition: opacity 0.1s, transform 0.1s; }
+  .streak-day:hover { opacity: 0.8 !important; transform: scale(1.15); }
 `;
 
 // ─── TrackBlock Component ─────────────────────────────────────────────────────
@@ -663,14 +694,130 @@ function OverviewTab({ onWeekClick }) {
   );
 }
 
+// ─── Streak Helpers ───────────────────────────────────────────────────────────
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function addDays(dateStr, n) {
+  const [y, m, dd] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, dd + n);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function computeStreak(dateSet) {
+  const today = todayStr();
+  const yesterday = addDays(today, -1);
+  let current = 0;
+  if (dateSet.has(today) || dateSet.has(yesterday)) {
+    let cur = dateSet.has(today) ? today : yesterday;
+    while (dateSet.has(cur)) { current++; cur = addDays(cur, -1); }
+  }
+  const sorted = [...dateSet].sort();
+  let longest = 0, run = 0, prev = null;
+  for (const ds of sorted) {
+    run = (prev && addDays(prev, 1) === ds) ? run + 1 : 1;
+    longest = Math.max(longest, run);
+    prev = ds;
+  }
+  return { current, longest };
+}
+
+const STREAK_TRACKS = [
+  { key: "dsa", label: "DSA",        color: "#22D3EE", dimColor: "#0C2A33" },
+  { key: "dp",  label: "DP",         color: "#A78BFA", dimColor: "#1C1033" },
+  { key: "sd",  label: "Sys Design", color: "#34D399", dimColor: "#0A2014" },
+  { key: "fsd", label: "Full-Stack", color: "#FB923C", dimColor: "#1E0A00" },
+];
+
+// ─── Streak Tab ───────────────────────────────────────────────────────────────
+function StreakTab({ streaks, onToggle }) {
+  const today = todayStr();
+  const days = [];
+  for (let i = 90; i >= 0; i--) days.push(addDays(today, -i));
+  const [fy, fm, fd] = days[0].split("-").map(Number);
+  const startDow = new Date(fy, fm - 1, fd).getDay();
+
+  return (
+    <div className="fade-slide">
+      <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16 }}>
+        STREAK LOG — click a day to mark it complete
+      </div>
+      {STREAK_TRACKS.map((track) => {
+        const dateSet = new Set(Object.keys(streaks[track.key] || {}).filter((k) => streaks[track.key][k]));
+        const { current, longest } = computeStreak(dateSet);
+        return (
+          <div key={track.key} className="streak-card" style={{ borderColor: track.color + "33", background: track.dimColor }}>
+            <div className="streak-header" style={{ borderBottomColor: track.color + "22" }}>
+              <span className="streak-label" style={{ color: track.color }}>{track.label}</span>
+              <div className="streak-stats">
+                <div className="streak-stat">
+                  <span className="streak-num" style={{ color: track.color }}>{current}</span>
+                  <span className="streak-sub">CURRENT</span>
+                </div>
+                <div className="streak-stat">
+                  <span className="streak-num" style={{ color: "var(--text2)" }}>{longest}</span>
+                  <span className="streak-sub">LONGEST</span>
+                </div>
+              </div>
+            </div>
+            <div className="streak-cal">
+              <div className="streak-dow-row">
+                {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
+                  <div key={i} className="streak-dow">{d}</div>
+                ))}
+              </div>
+              <div className="streak-grid">
+                {Array.from({ length: startDow }, (_, i) => <div key={`p${i}`} />)}
+                {days.map((ds) => {
+                  const done = dateSet.has(ds);
+                  const isToday = ds === today;
+                  return (
+                    <div
+                      key={ds}
+                      title={ds}
+                      onClick={() => onToggle(track.key, ds)}
+                      className="streak-day"
+                      style={{
+                        background: done ? track.color : "var(--bg3)",
+                        border: isToday ? `1px solid ${track.color}` : "1px solid transparent",
+                        opacity: done ? 1 : 0.45,
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Root App ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [activeWeek, setActiveWeek] = useState(1);
   const [activeTab, setActiveTab] = useState("week");
   const [checked, setChecked] = useState({});
+  const [streaks, setStreaks] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("faang-streaks") || "{}"); } catch { return {}; }
+  });
+
+  useEffect(() => {
+    localStorage.setItem("faang-streaks", JSON.stringify(streaks));
+  }, [streaks]);
 
   const handleToggle = useCallback((key) => {
     setChecked((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  const handleStreakToggle = useCallback((trackKey, dateStr) => {
+    setStreaks((prev) => ({
+      ...prev,
+      [trackKey]: { ...(prev[trackKey] || {}), [dateStr]: !(prev[trackKey]?.[dateStr]) },
+    }));
   }, []);
 
   const goToWeek = (n) => {
@@ -784,6 +931,7 @@ export default function App() {
               { key: "heatmap",    label: "Heatmap" },
               { key: "daily",      label: "Daily Split" },
               { key: "milestones", label: "Milestones" },
+              { key: "streaks",    label: "Streaks" },
             ].map((t) => (
               <button
                 key={t.key}
@@ -816,6 +964,7 @@ export default function App() {
             {activeTab === "heatmap" && <HeatmapTab onWeekClick={goToWeek} />}
             {activeTab === "daily" && <DailyTab />}
             {activeTab === "milestones" && <MilestonesTab onWeekClick={goToWeek} />}
+            {activeTab === "streaks" && <StreakTab streaks={streaks} onToggle={handleStreakToggle} />}
           </div>
         </div>
       </div>
