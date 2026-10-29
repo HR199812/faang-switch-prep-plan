@@ -1,0 +1,207 @@
+{
+ "minutes": 14,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Trading exactness for memory",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "At web scale, exact answers can be absurdly expensive: remembering every URL a crawler has seen, every unique visitor to a page, or the exact count of every search query. Probabilistic structures answer the same questions in fixed, tiny memory with bounded, quantifiable error — and most of them can be merged across machines, which makes them perfect for distributed aggregation."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Question",
+      "Exact cost",
+      "Probabilistic answer",
+      "Memory"
+     ],
+     "rows": [
+      [
+       "Seen this URL before? (10B URLs)",
+       "~1 TB hash set",
+       "Bloom filter, 1% false positives",
+       "~12 GB"
+      ],
+      [
+       "Unique visitors today?",
+       "Set of all ids",
+       "HyperLogLog, ~0.8% error",
+       "12 KB per counter"
+      ],
+      [
+       "How often was query q searched?",
+       "Map of every query",
+       "Count-Min sketch",
+       "Fixed, e.g. a few MB"
+      ],
+      [
+       "p99 latency across 1,000 hosts?",
+       "All samples",
+       "t-digest / DDSketch",
+       "KBs, mergeable"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "bloom",
+   "title": "Bloom filters: how they work",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Set up",
+       "text": "A bit array of m bits, all 0, and k independent hash functions."
+      },
+      {
+       "title": "Insert x",
+       "text": "Compute h1(x)…hk(x) mod m and set those k bits to 1."
+      },
+      {
+       "title": "Query y",
+       "text": "Check its k bits. Any 0 → y was **definitely never inserted**. All 1 → **probably** inserted (bits may have been set by other items)."
+      },
+      {
+       "title": "Size it",
+       "text": "For n items and false-positive rate p: m ≈ −n·ln p / (ln 2)², k ≈ (m/n)·ln 2 → ~9.6 bits per item and 7 hashes at 1%."
+      }
+     ]
+    },
+    {
+     "t": "seq",
+     "actors": [
+      "Read k",
+      "Bloom (SSTable 3)",
+      "Bloom (SSTable 2)",
+      "SSTable 2 on disk"
+     ],
+     "steps": [
+      {
+       "from": "Read k",
+       "to": "Bloom (SSTable 3)",
+       "label": "might contain k?"
+      },
+      {
+       "from": "Bloom (SSTable 3)",
+       "to": "Read k",
+       "label": "no (a bit is 0)",
+       "note": "skip disk read",
+       "dashed": true
+      },
+      {
+       "from": "Read k",
+       "to": "Bloom (SSTable 2)",
+       "label": "might contain k?"
+      },
+      {
+       "from": "Bloom (SSTable 2)",
+       "to": "Read k",
+       "label": "maybe",
+       "dashed": true
+      },
+      {
+       "from": "Read k",
+       "to": "SSTable 2 on disk",
+       "label": "seek + read",
+       "note": "1% chance it's a wasted read"
+      }
+     ],
+     "caption": "A Bloom filter in front of an LSM read"
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Using a Bloom filter where a false positive is harmful (e.g. \"username taken\" without checking the database). Use it to skip work, and confirm positives against the source of truth."
+    }
+   ]
+  },
+  {
+   "id": "hll",
+   "title": "HyperLogLog: counting distinct items",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Hash every item to a uniformly random bit string. Among n distinct items, the longest run of leading zeros you'll see is about log₂ n — seeing 20 leading zeros suggests roughly a million distinct items. One such estimate is noisy, so HLL splits items into m registers by the first few hash bits, tracks the max leading-zero run per register, and combines them with a harmonic mean. With 16,384 registers (12 KB in Redis) the standard error is ~0.81%."
+    },
+    {
+     "t": "list",
+     "items": [
+      "**Mergeable:** the union of two HLLs is the register-wise max — compute daily uniques per shard and merge for monthly uniques.",
+      "Can't remove items or list them; only estimate cardinality.",
+      "Redis: PFADD key item, PFCOUNT key, PFMERGE dest src1 src2."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cms",
+   "title": "Count-Min sketch and heavy hitters",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "A d × w grid of counters with one hash function per row. To add item x, increment one counter in each row (column = h_i(x)). To estimate x's count, take the **minimum** of its d counters — collisions only ever add, so the minimum is the least-polluted estimate. With w = ⌈e/ε⌉ and d = ⌈ln(1/δ)⌉, the estimate exceeds the true count by at most ε·N with probability 1 − δ."
+    },
+    {
+     "t": "list",
+     "items": [
+      "**Top-K heavy hitters:** process the stream, update the sketch, and keep a min-heap of the K items with the largest estimates.",
+      "Sketches merge by adding counters element-wise — compute per partition, combine centrally.",
+      "Used for trending hashtags, top queries, DDoS source detection, network flow monitoring."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "others",
+   "title": "Other useful sketches",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Structure",
+      "Use"
+     ],
+     "rows": [
+      [
+       "Cuckoo filter",
+       "Like a Bloom filter but supports deletion and has better space at low FP rates"
+      ],
+      [
+       "Counting Bloom filter",
+       "Deletions via small counters instead of bits"
+      ],
+      [
+       "t-digest / DDSketch",
+       "Mergeable quantiles (p50/p99) for latency metrics"
+      ],
+      [
+       "MinHash / SimHash",
+       "Estimate similarity between sets/documents → near-duplicate detection"
+      ],
+      [
+       "Reservoir sampling",
+       "Uniform random sample of a stream of unknown length"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "interview",
+   "title": "Using them in interviews",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The crawler keeps seen URLs in a sharded Bloom filter — a false positive only skips one page — and the analytics pipeline keeps a HyperLogLog per ad per day for unique viewers, merged into weekly and monthly numbers."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,233 @@
+{
+ "minutes": 16,
+ "sections": [
+  {
+   "id": "failures",
+   "title": "Failures are normal",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "In a distributed system some dependency is always slow or failing: a database failover, a GC pause, a network blip, a bad deploy. The goal isn't to prevent failures — it's to keep one failure from cascading into a total outage. Four tools do most of the work: **timeouts, retries (with idempotency), circuit breakers, and bulkheads**."
+    }
+   ]
+  },
+  {
+   "id": "timeouts",
+   "title": "Timeouts",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Every network call needs a timeout. Without one, a hung dependency ties up threads/connections until the whole service stops responding.",
+      "Set timeouts from the dependency's latency distribution (e.g. a little above p99.9), not arbitrary round numbers.",
+      "Propagate **deadlines**: if the user request has 800 ms left, downstream calls get at most what remains (gRPC deadlines do this)."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Retrying a call with a 30-second timeout three times behind a 10-second user request. The user is long gone; you've just tripled load on a struggling dependency."
+    }
+   ]
+  },
+  {
+   "id": "retries",
+   "title": "Retries done safely",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "js",
+     "text": "// Exponential backoff with full jitter\nasync function withRetry(fn, { attempts = 4, base = 100, cap = 2000 } = {}) {\n  for (let i = 0; ; i++) {\n    try { return await fn(); }\n    catch (e) {\n      if (i === attempts - 1 || !isRetryable(e)) throw e;   // 4xx: don't retry\n      const delay = Math.random() * Math.min(cap, base * 2 ** i);\n      await new Promise((r) => setTimeout(r, delay));\n    }\n  }\n}"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Retry only **transient** errors (timeouts, 503, connection resets), never validation errors.",
+      "**Jitter** prevents synchronised retry waves.",
+      "**Retry budgets:** cap retries to e.g. 10% of requests so retries can't multiply load during an outage.",
+      "Retry at **one layer**, not every layer — 3 retries × 3 layers = 27× amplification."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "idempotency",
+   "title": "Idempotency makes retries safe",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Client",
+      "API",
+      "Idempotency store",
+      "Payments"
+     ],
+     "steps": [
+      {
+       "from": "Client",
+       "to": "API",
+       "label": "POST /charge (Idempotency-Key: k9)"
+      },
+      {
+       "from": "API",
+       "to": "Idempotency store",
+       "label": "INSERT k9 (in progress)",
+       "note": "unique key"
+      },
+      {
+       "from": "API",
+       "to": "Payments",
+       "label": "charge $20"
+      },
+      {
+       "from": "Payments",
+       "to": "API",
+       "label": "ok",
+       "dashed": true
+      },
+      {
+       "from": "API",
+       "to": "Idempotency store",
+       "label": "save response for k9"
+      },
+      {
+       "from": "API",
+       "to": "Client",
+       "label": "timeout ✕",
+       "note": "response lost on the way",
+       "dashed": true
+      },
+      {
+       "from": "Client",
+       "to": "API",
+       "label": "retry with k9"
+      },
+      {
+       "from": "API",
+       "to": "Idempotency store",
+       "label": "lookup k9 → stored response"
+      },
+      {
+       "from": "API",
+       "to": "Client",
+       "label": "200 (same result, no new charge)",
+       "dashed": true
+      }
+     ],
+     "caption": "Idempotency key on a payment call"
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "An operation is idempotent if doing it twice has the same effect as once. Natural idempotency (PUT, upsert by id, \"set status to shipped\") is best; otherwise use client-supplied idempotency keys stored with the result."
+    }
+   ]
+  },
+  {
+   "id": "breaker",
+   "title": "Circuit breakers",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Closed",
+       "text": "Calls flow normally; failures are counted over a rolling window."
+      },
+      {
+       "title": "Open",
+       "text": "Failure rate crossed a threshold: fail fast without calling the dependency, return a fallback."
+      },
+      {
+       "title": "Half-open",
+       "text": "After a cool-down, let a few trial requests through."
+      },
+      {
+       "title": "Close or reopen",
+       "text": "If trials succeed, close; if they fail, open again."
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Failing fast frees your threads and gives the struggling dependency room to recover. Pair it with a **fallback**: cached data, a default, a degraded feature (\"recommendations unavailable\")."
+    }
+   ]
+  },
+  {
+   "id": "bulkheads",
+   "title": "Bulkheads and load shedding",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Bulkheads:** separate thread/connection pools per dependency, so a slow recommendations service can't exhaust the pool used for checkout.",
+      "**Load shedding:** when overloaded, reject excess requests quickly (503 / 429) rather than queueing until everything times out.",
+      "**Prioritise:** shed analytics and prefetch traffic before user-facing writes.",
+      "**Graceful degradation:** serve stale cache, hide non-critical widgets, turn off expensive features via feature flags."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "together",
+   "title": "Putting it together",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Request",
+        "kind": "client",
+        "sub": "deadline 800 ms"
+       }
+      ],
+      [
+       {
+        "label": "Bulkhead pool",
+        "kind": "service",
+        "sub": "max 50 in flight"
+       }
+      ],
+      [
+       {
+        "label": "Circuit breaker",
+        "kind": "service",
+        "sub": "open → fallback"
+       }
+      ],
+      [
+       {
+        "label": "Retry w/ backoff + jitter",
+        "kind": "service",
+        "sub": "budget 10%"
+       }
+      ],
+      [
+       {
+        "label": "Timeout 200 ms",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Dependency",
+        "kind": "ext"
+       }
+      ]
+     ],
+     "caption": "A resilient call path"
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Every call gets a timeout derived from the request deadline, one layer of jittered retries for transient errors on idempotent operations, a circuit breaker with a cached fallback, and its own bulkhead pool."
+    }
+   ]
+  }
+ ]
+}

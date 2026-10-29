@@ -1,0 +1,451 @@
+{
+ "id": "uber",
+ "num": 5,
+ "title": "Uber",
+ "summary": "Ride matching in real time: drivers stream locations into a cell-based geo index, the dispatcher searches neighbouring cells by ETA, and trips run as a strongly consistent state machine.",
+ "tags": [
+  "Geospatial",
+  "Matching",
+  "Realtime",
+  "State machine"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "geospatial",
+  "apis-realtime",
+  "transactions-locks",
+  "queues-kafka",
+  "consistency"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Rider requests a ride; sees fare estimate and nearby cars"
+      ],
+      [
+       "Functional",
+       "Match the rider to a nearby available driver; driver accepts or declines"
+      ],
+      [
+       "Functional",
+       "Live location tracking during the trip; payment at the end"
+      ],
+      [
+       "Non-functional",
+       "Match within a few seconds; location updates every ~4 s"
+      ],
+      [
+       "Non-functional",
+       "A driver is never assigned to two trips (strong consistency on assignment)"
+      ],
+      [
+       "Non-functional",
+       "Survive a data center failure mid-trip"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Active drivers",
+       "value": "5M",
+       "sub": "peak online"
+      },
+      {
+       "label": "Location updates",
+       "value": "~1.25M/s",
+       "sub": "1 per 4 s"
+      },
+      {
+       "label": "Ride requests",
+       "value": "~1k–2k/s",
+       "sub": "peak"
+      },
+      {
+       "label": "Location payload",
+       "value": "~100 B",
+       "sub": "≈ 125 MB/s ingest"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The write-heavy part is location: over a million updates a second, but each one only needs to live a few seconds in memory. Ride requests are small; the hard part is matching correctly and fast."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/drivers/location   { lat, lng, heading, ts }          (every 4 s, or over a socket)\nPOST /v1/rides              { pickup, dropoff, product }     -> { rideId, status: MATCHING }\nPOST /v1/rides/{id}/accept   (driver)                        -> 200 | 409 already taken\nWS   ride updates: DRIVER_ASSIGNED, ARRIVING, IN_TRIP, COMPLETED"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Data",
+      "Key",
+      "Store"
+     ],
+     "rows": [
+      [
+       "Driver location (live)",
+       "H3 cell → set of driver_ids; driver_id → (lat, lng, ts, status)",
+       "In-memory sharded by cell (Redis / custom ring)"
+      ],
+      [
+       "Trips",
+       "trip_id",
+       "Strongly consistent DB (sharded SQL / Schemaless / Spanner-like)"
+      ],
+      [
+       "Location history",
+       "(trip_id, ts)",
+       "Append-only (Cassandra) for receipts and disputes"
+      ],
+      [
+       "Pricing / surge",
+       "H3 cell → multiplier",
+       "Cache, recomputed every ~minute"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Rider app",
+        "kind": "client"
+       },
+       {
+        "label": "Driver app",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "API gateway",
+        "kind": "edge"
+       },
+       {
+        "label": "Location ingest",
+        "kind": "service",
+        "sub": "WebSocket / UDP-ish"
+       }
+      ],
+      [
+       {
+        "label": "Dispatch service",
+        "kind": "service",
+        "sub": "match + offer"
+       },
+       {
+        "label": "Geo index",
+        "kind": "cache",
+        "sub": "H3 cells in memory"
+       }
+      ],
+      [
+       {
+        "label": "Trip service",
+        "kind": "service",
+        "sub": "state machine"
+       },
+       {
+        "label": "Kafka",
+        "kind": "queue",
+        "sub": "locations, events"
+       }
+      ],
+      [
+       {
+        "label": "Trip DB",
+        "kind": "db"
+       },
+       {
+        "label": "ETA / maps",
+        "kind": "service"
+       },
+       {
+        "label": "Pricing",
+        "kind": "service"
+       }
+      ]
+     ],
+     "caption": "Location ingest feeds the geo index; dispatch queries it and assigns atomically"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Driver app streams location → ingest updates the driver's cell in the geo index and publishes to Kafka.",
+      "Rider requests → dispatch computes the pickup cell, reads drivers in that cell and k-ring neighbours, filters available ones.",
+      "Rank by road ETA (not straight-line distance), offer to the best driver with a 10–15 s timeout.",
+      "On accept, trip service does a conditional update: driver status AVAILABLE → ON_TRIP and trip MATCHING → ASSIGNED, atomically."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "geo",
+   "title": "Deep dive: geo index",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Option",
+      "Fit"
+     ],
+     "rows": [
+      [
+       "Geohash prefix",
+       "Simple; rectangular cells distort; neighbours need 8 lookups"
+      ],
+      [
+       "Quadtree",
+       "Adapts to density; rebuild cost with constantly moving points"
+      ],
+      [
+       "H3 hexagons (Uber)",
+       "Equal-distance neighbours, hierarchical resolutions, good for surge zones and k-ring search"
+      ]
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Use a resolution where a cell is ~0.1–1 km²; search ring k=1, expand to k=2..3 if too few drivers.",
+      "Shard the index by cell (consistent hashing over cell IDs). A moving driver occasionally changes shard: remove from old cell, add to new.",
+      "Locations older than ~30 s are treated as stale and ignored."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd index drivers by H3 cell in memory. Matching is 'read my cell plus neighbours, filter by availability, rank by ETA', so every query touches a handful of keys."
+    }
+   ]
+  },
+  {
+   "id": "matching",
+   "title": "Deep dive: matching and avoiding double assignment",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Greedy nearest-driver is simple; batched matching (collect requests for ~2 s, solve assignment) gives better global ETAs.",
+      "Each offer reserves the driver with a short lease (`SET driver:42:offer ride:9 NX PX 15000`) so two dispatchers don't offer the same driver.",
+      "Final assignment is a compare-and-set in the trip DB; if it fails (409), dispatch moves to the next candidate.",
+      "Trip lifecycle is an explicit state machine: REQUESTED → MATCHING → ASSIGNED → ARRIVED → IN_TRIP → COMPLETED / CANCELLED; every transition idempotent with a version."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Using only the cache to mark a driver busy is unsafe. The lease prevents concurrent offers; the database CAS is the source of truth."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Geo shard down",
+       "No drivers visible in an area",
+       "Replicas; drivers repopulate within one 4 s update cycle"
+      ],
+      [
+       "Data center fails mid-trip",
+       "Trip state lost",
+       "Trip DB replicated across regions; driver app caches trip state and replays it (Uber used the phone as a backup)"
+      ],
+      [
+       "Event surge (concert ends)",
+       "Request spike in one cell",
+       "Surge pricing, request queueing, batched matching"
+      ],
+      [
+       "Driver offline after accept",
+       "Rider stuck",
+       "Heartbeat timeout → re-dispatch"
+      ],
+      [
+       "Payment provider down",
+       "Trip can't close",
+       "Complete trip, charge async with retries and idempotency key"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Location store",
+       "In memory, ephemeral",
+       "History (sent to Kafka instead)"
+      ],
+      [
+       "Assignment",
+       "Strong consistency",
+       "Some latency on accept"
+      ],
+      [
+       "Matching",
+       "Batched windows",
+       "~1–2 s extra wait for better global ETA"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Request, match, track, pay."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Seconds to match, no double booking."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "1.25M location writes/s, ~2k requests/s."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "Location stream, ride state machine."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Ingest → geo index; dispatch → trip service CAS."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "H3 index, matching + leases, trip state machine."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "DC failover, surge, monitoring match time and ETA error."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you compute surge pricing?",
+       "a": "Per H3 cell, every ~minute: demand (requests) vs supply (available drivers), smoothed, capped; published to a cache read by pricing."
+      },
+      {
+       "q": "How do you show cars moving smoothly on the rider map?",
+       "a": "Client interpolates between 4 s updates using heading and speed; server sends only the assigned driver's updates during the trip."
+      },
+      {
+       "q": "Why not store locations in Postgres with PostGIS?",
+       "a": "1.25M updates/s of short-lived data would overwhelm a relational DB; in-memory cells fit the access pattern."
+      },
+      {
+       "q": "How does ETA work?",
+       "a": "Road graph with live traffic, precomputed contraction hierarchies, ML correction; cached per cell pair."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Locations: 1M+/s, in memory, keyed by H3 cell.",
+      "Search = my cell + k-ring neighbours, rank by ETA.",
+      "Offer lease prevents double offers; DB CAS prevents double assignment.",
+      "Trip = explicit idempotent state machine.",
+      "Batched matching improves global ETA.",
+      "Surge per cell from supply vs demand."
+     ]
+    }
+   ]
+  }
+ ]
+}

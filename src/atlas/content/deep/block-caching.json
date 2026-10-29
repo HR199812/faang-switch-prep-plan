@@ -1,0 +1,252 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Why caching works",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Most workloads are skewed: a small fraction of keys gets most of the traffic (a Zipf distribution). Keeping that hot fraction in memory — ~100 ns access instead of a ~1 ms database query — cuts latency and, more importantly, absorbs load the database couldn't handle. A cache with a 95% hit rate means the database sees only 1 in 20 reads."
+    },
+    {
+     "t": "p",
+     "text": "Caches exist at every layer: the browser, the CDN, the application process, a shared cache cluster (Redis/Memcached), and the database's own buffer pool. In system design interviews, \"the cache\" usually means a shared in-memory cluster in front of the database."
+    }
+   ]
+  },
+  {
+   "id": "patterns",
+   "title": "Read and write patterns",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "App",
+      "Cache",
+      "Database"
+     ],
+     "steps": [
+      {
+       "from": "App",
+       "to": "Cache",
+       "label": "GET user:42"
+      },
+      {
+       "from": "Cache",
+       "to": "App",
+       "label": "miss",
+       "dashed": true
+      },
+      {
+       "from": "App",
+       "to": "Database",
+       "label": "SELECT … WHERE id=42"
+      },
+      {
+       "from": "Database",
+       "to": "App",
+       "label": "row",
+       "dashed": true
+      },
+      {
+       "from": "App",
+       "to": "Cache",
+       "label": "SET user:42 EX 300",
+       "note": "populate with TTL"
+      },
+      {
+       "from": "App",
+       "to": "Database",
+       "label": "UPDATE user 42",
+       "note": "on write…"
+      },
+      {
+       "from": "App",
+       "to": "Cache",
+       "label": "DEL user:42",
+       "note": "…invalidate, don't update"
+      }
+     ],
+     "caption": "Cache-aside (lazy loading) — the default"
+    },
+    {
+     "t": "table",
+     "head": [
+      "Pattern",
+      "How",
+      "Pros",
+      "Cons"
+     ],
+     "rows": [
+      [
+       "Cache-aside",
+       "App reads cache, falls back to DB, populates",
+       "Only caches what's used; cache failure isn't fatal",
+       "First read is slow; stale window"
+      ],
+      [
+       "Read-through",
+       "Cache library loads from DB on miss",
+       "Simpler app code",
+       "Cache must know the DB"
+      ],
+      [
+       "Write-through",
+       "Write cache and DB synchronously",
+       "Cache always fresh",
+       "Slower writes; caches unread data"
+      ],
+      [
+       "Write-back (write-behind)",
+       "Write cache; flush to DB later",
+       "Very fast writes",
+       "Data loss if cache dies before flush"
+      ],
+      [
+       "Write-around",
+       "Write DB only; cache fills on read",
+       "Avoids caching write-once data",
+       "Recent writes miss"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "invalidation",
+   "title": "Invalidation: the hard part",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "When the source of truth changes, the cache must not keep serving the old value forever. Strategies, from simplest to strongest:"
+    },
+    {
+     "t": "list",
+     "items": [
+      "**TTL only:** every entry expires after N seconds. Bounded staleness, zero coordination. Often good enough.",
+      "**Delete on write:** after updating the DB, delete the key. Deleting (rather than setting) avoids writing a stale value when two writers race.",
+      "**Event-driven:** CDC from the database publishes changes; a consumer invalidates keys. Catches writes from any service.",
+      "**Versioned keys:** include a version in the key (`user:42:v7`); bump the version on write."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Updating the cache instead of deleting it on writes. Two concurrent writers can apply DB updates in one order and cache updates in the other, leaving the cache permanently wrong until TTL."
+    }
+   ]
+  },
+  {
+   "id": "eviction",
+   "title": "Eviction policies",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Policy",
+      "Evicts",
+      "Good for"
+     ],
+     "rows": [
+      [
+       "LRU",
+       "Least recently used",
+       "General purpose (Redis allkeys-lru)"
+      ],
+      [
+       "LFU",
+       "Least frequently used",
+       "Stable popularity; resists scans"
+      ],
+      [
+       "TTL / volatile-*",
+       "Expiring keys first",
+       "Mixed persistent + cache data"
+      ],
+      [
+       "FIFO / random",
+       "Oldest / random",
+       "Simple, cheap"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Size the cache to the working set: if 20% of 50 GB of data gets 80% of reads, ~10 GB of cache buys most of the benefit."
+    }
+   ]
+  },
+  {
+   "id": "problems",
+   "title": "Three classic cache failures",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Problem",
+      "What happens",
+      "Fix"
+     ],
+     "rows": [
+      [
+       "Stampede (dog-pile)",
+       "A hot key expires; thousands of requests miss at once and all hit the DB",
+       "Request coalescing / single-flight lock, early probabilistic refresh, stale-while-revalidate"
+      ],
+      [
+       "Penetration",
+       "Requests for keys that don't exist always miss and hit the DB",
+       "Cache negative results briefly; Bloom filter of valid keys"
+      ],
+      [
+       "Avalanche",
+       "Many keys expire at the same moment (same TTL set at deploy)",
+       "Add random jitter to TTLs; warm caches gradually"
+      ]
+     ]
+    },
+    {
+     "t": "code",
+     "lang": "js",
+     "text": "// Single-flight: only one request per key recomputes on a miss\nconst inflight = new Map();\nasync function getUser(id) {\n  const hit = await cache.get(`user:${id}`);\n  if (hit) return hit;\n  if (!inflight.has(id)) {\n    inflight.set(id, db.loadUser(id)\n      .then(async (u) => { await cache.set(`user:${id}`, u, { ttl: 300 + Math.random() * 60 }); return u; })\n      .finally(() => inflight.delete(id)));\n  }\n  return inflight.get(id);\n}"
+    }
+   ]
+  },
+  {
+   "id": "consistency",
+   "title": "Consistency expectations",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Caches make systems eventually consistent by default; say what staleness is acceptable (\"profile edits visible within a few seconds\").",
+      "Read-your-own-writes: after a user edits, read from the DB (or bypass the cache) for that user for a short window.",
+      "Never cache data whose staleness is unsafe (balances, inventory at checkout) — or cache it and verify against the source of truth on the critical path."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hot",
+   "title": "Hot keys and scaling the cache",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Shard the cache cluster by key hash (Redis Cluster, consistent hashing in Memcached clients).",
+      "A single celebrity key can exceed one node's capacity: replicate it to several keys (`hot:key#1..n`) and read a random copy, or add a small in-process L1 cache in front.",
+      "Monitor hit ratio, evictions and memory; a falling hit ratio usually means the working set outgrew the cache."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd use cache-aside with TTLs plus delete-on-write, jittered TTLs to avoid avalanches, and single-flight to prevent stampedes on hot keys."
+    }
+   ]
+  }
+ ]
+}

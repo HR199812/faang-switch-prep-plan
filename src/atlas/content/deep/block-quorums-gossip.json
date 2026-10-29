@@ -1,0 +1,202 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "why",
+   "title": "The leaderless toolkit",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Leaderless databases (Dynamo, Cassandra, Riak, ScyllaDB) let any replica accept reads and writes. With no leader to order operations, they rely on a set of primitives: quorums to bound staleness, sloppy quorums and hinted handoff to stay available, version vectors to detect conflicts, read repair and Merkle-tree anti-entropy to converge, and gossip to track who's alive. Interviewers expect you to name and explain these when you design a key-value store."
+    }
+   ]
+  },
+  {
+   "id": "quorum",
+   "title": "Quorums: R + W > N",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Coordinator",
+      "Replica A",
+      "Replica B",
+      "Replica C"
+     ],
+     "steps": [
+      {
+       "from": "Coordinator",
+       "to": "Replica A",
+       "label": "write v2"
+      },
+      {
+       "from": "Coordinator",
+       "to": "Replica B",
+       "label": "write v2"
+      },
+      {
+       "from": "Coordinator",
+       "to": "Replica C",
+       "label": "write v2",
+       "note": "slow / down"
+      },
+      {
+       "from": "Replica A",
+       "to": "Coordinator",
+       "label": "ack",
+       "dashed": true
+      },
+      {
+       "from": "Replica B",
+       "to": "Coordinator",
+       "label": "ack → success (W=2)",
+       "dashed": true
+      },
+      {
+       "from": "Coordinator",
+       "to": "Replica B",
+       "label": "read"
+      },
+      {
+       "from": "Coordinator",
+       "to": "Replica C",
+       "label": "read"
+      },
+      {
+       "from": "Replica B",
+       "to": "Coordinator",
+       "label": "v2",
+       "dashed": true
+      },
+      {
+       "from": "Replica C",
+       "to": "Coordinator",
+       "label": "v1 (stale)",
+       "note": "newest wins; repair C",
+       "dashed": true
+      }
+     ],
+     "caption": "N = 3, W = 2, R = 2"
+    },
+    {
+     "t": "p",
+     "text": "Because any 2 of 3 replicas overlap with any other 2 of 3, a quorum read always includes at least one replica with the latest acknowledged write. The coordinator returns the newest version and **read-repairs** the stale replica in the background."
+    }
+   ]
+  },
+  {
+   "id": "sloppy",
+   "title": "Sloppy quorums and hinted handoff",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Owner down",
+       "text": "Key k belongs to replicas A, B, C; C is unreachable."
+      },
+      {
+       "title": "Write elsewhere",
+       "text": "Coordinator writes to A, B and stand-in D, tagging D's copy with a hint: \"belongs to C\"."
+      },
+      {
+       "title": "Handoff",
+       "text": "When gossip reports C is back, D streams the hinted writes to C and deletes them."
+      },
+      {
+       "title": "Trade-off",
+       "text": "Writes stay available, but a quorum read of A, B, C during the outage might miss data that lives on D."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Claiming R + W > N guarantees strong consistency. With sloppy quorums, concurrent writes and last-write-wins clocks, it doesn't. It bounds staleness in the normal case."
+    }
+   ]
+  },
+  {
+   "id": "versions",
+   "title": "Detecting concurrent writes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Approach",
+      "How",
+      "Outcome"
+     ],
+     "rows": [
+      [
+       "Last-write-wins",
+       "Compare timestamps; keep the newest",
+       "Simple; silently drops one of two concurrent writes"
+      ],
+      [
+       "Version vectors",
+       "Each replica increments its own counter; compare vectors",
+       "Detects true concurrency; returns siblings for the app to merge"
+      ],
+      [
+       "CRDTs",
+       "Data types with a commutative merge (G-counter, OR-set)",
+       "Automatic, correct merges for supported types"
+      ]
+     ]
+    },
+    {
+     "t": "code",
+     "lang": "text",
+     "text": "v1 = {A:1}           written via A\nv2 = {A:1, B:1}      read v1, written via B      → v2 descends from v1\nv3 = {A:2}           read v1, written via A      → v2 and v3 are CONCURRENT → keep both"
+    }
+   ]
+  },
+  {
+   "id": "merkle",
+   "title": "Anti-entropy with Merkle trees",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Read repair only fixes keys that get read. To fix everything else, replicas periodically compare **Merkle trees**: each leaf hashes a small key range, each parent hashes its children. Two replicas compare roots; if equal, they're in sync. If not, they descend only into the differing branches, so finding the few divergent ranges among billions of keys takes a logarithmic number of comparisons, and only those ranges are streamed."
+    }
+   ]
+  },
+  {
+   "id": "gossip",
+   "title": "Gossip and failure detection",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Every second, each node picks a few random peers and exchanges its view of cluster membership (node, status, heartbeat counter, version).",
+      "News spreads like an epidemic: everyone knows within O(log N) rounds, with no central coordinator to fail.",
+      "**Phi-accrual failure detection:** instead of a fixed timeout, compute how unusual the current silence is given past heartbeat intervals, and suspect a node when φ crosses a threshold.",
+      "Gossip also spreads schema versions and token (ring) ownership in Cassandra."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Membership is gossiped, writes use sloppy quorums with hinted handoff, reads use quorum plus read repair, and Merkle-tree anti-entropy converges everything in the background."
+    }
+   ]
+  },
+  {
+   "id": "leases",
+   "title": "Heartbeats, leases and fencing",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "A **lease** is ownership with an expiry (\"leader until 12:00:30\"), renewed by heartbeats. It lets a leader act without asking a quorum each time.",
+      "Leases assume bounded clock drift and can't stop a paused process from acting after expiry.",
+      "**Fencing tokens** close the gap: each new lease gets a higher number, and storage rejects writes with stale tokens."
+     ]
+    }
+   ]
+  }
+ ]
+}

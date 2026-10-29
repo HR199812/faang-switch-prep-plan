@@ -1,0 +1,436 @@
+{
+ "id": "meta-serverless",
+ "num": 11,
+ "title": "Meta Serverless",
+ "summary": "A function-as-a-service platform at hyperscale: queue every invocation, run functions on shared warm worker pools, and use deferral and admission control to smooth spiky load across regions.",
+ "tags": [
+  "Scheduling",
+  "Queues",
+  "Autoscaling",
+  "Isolation"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "queues-kafka",
+  "resilience",
+  "scaling-lb",
+  "rate-limiting"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Developers deploy functions; invoke via events, schedules or RPC"
+      ],
+      [
+       "Functional",
+       "Retries, timeouts, per-function concurrency limits"
+      ],
+      [
+       "Non-functional",
+       "Trillions of invocations per day across many regions (Meta's XFaaS reports this scale)"
+      ],
+      [
+       "Non-functional",
+       "High utilization: avoid idle reserved capacity"
+      ],
+      [
+       "Non-functional",
+       "Protect downstream services from function-driven load spikes"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Meta's XFaaS paper (SOSP 2023) describes running functions on shared worker pools where every worker can run any function, and deferring delay-tolerant calls. AWS Lambda's Firecracker microVMs are a contrast for isolation."
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Invocations",
+       "value": "~10M/s",
+       "sub": "peak, global"
+      },
+      {
+       "label": "Peak : average",
+       "value": "~4×",
+       "sub": "diurnal + spikes"
+      },
+      {
+       "label": "Delay-tolerant share",
+       "value": "large",
+       "sub": "many calls are async"
+      },
+      {
+       "label": "Workers",
+       "value": "100k+",
+       "sub": "servers"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Most invocations don't need an answer this second. If I can defer them to off-peak, the fleet can be sized near the average instead of the peak."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "text",
+     "text": "deploy(function_name, code_bundle, runtime, limits{memory, timeout, concurrency}, criticality)\ninvoke(function_name, args, mode: SYNC | ASYNC, deadline?, idempotency_key?)\nschedule(function_name, cron)\nstatus(invocation_id) -> QUEUED | RUNNING | SUCCEEDED | FAILED(retrying)"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Data",
+      "Key",
+      "Store"
+     ],
+     "rows": [
+      [
+       "Function registry",
+       "function_name + version",
+       "Replicated config store"
+      ],
+      [
+       "Invocation queue",
+       "Durable queue sharded by function/criticality",
+       "Distributed queue (Kafka-like or custom)"
+      ],
+      [
+       "Invocation state",
+       "invocation_id",
+       "KV store with TTL"
+      ],
+      [
+       "Code bundles",
+       "hash",
+       "Blob storage + local worker cache"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Callers",
+        "kind": "client",
+        "sub": "services, events, cron"
+       }
+      ],
+      [
+       {
+        "label": "Submitter",
+        "kind": "edge",
+        "sub": "auth, quotas"
+       }
+      ],
+      [
+       {
+        "label": "Durable queues",
+        "kind": "queue",
+        "sub": "by criticality"
+       }
+      ],
+      [
+       {
+        "label": "Scheduler",
+        "kind": "service",
+        "sub": "global + regional"
+       },
+       {
+        "label": "Rate limiter",
+        "kind": "service",
+        "sub": "protect downstreams"
+       }
+      ],
+      [
+       {
+        "label": "Worker pool",
+        "kind": "service",
+        "sub": "universal runtime, warm"
+       },
+       {
+        "label": "Code cache",
+        "kind": "store"
+       }
+      ],
+      [
+       {
+        "label": "Downstream services",
+        "kind": "ext"
+       }
+      ]
+     ],
+     "caption": "Submit → durable queue → scheduler → shared warm workers"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Submitter accepts the call, enforces quotas, writes to a durable queue, returns an invocation ID.",
+      "Schedulers pull by priority and deadline, check downstream rate limits, dispatch to a worker.",
+      "Workers are pre-warmed with many functions' code loaded (universal workers), so most calls skip cold start.",
+      "Results/retries are recorded; failures retry with backoff until deadline, then go to a dead-letter path."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "scheduling",
+   "title": "Deep dive: scheduling and load shifting",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Classify by criticality and deadline: user-facing sync calls run now; async calls with hours of slack can wait.",
+      "**Time shifting:** defer delay-tolerant work to off-peak hours, flattening the daily curve.",
+      "**Space shifting:** route to regions with spare capacity (global dispatcher sees regional utilization).",
+      "Per-function concurrency limits and fair share so one tenant can't starve others.",
+      "Downstream protection: back off dispatch when a called service signals overload (adaptive rate limiting)."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key idea",
+     "text": "A queue in front of compute turns spiky demand into a schedulable backlog; deadlines tell you how much you're allowed to delay."
+    }
+   ]
+  },
+  {
+   "id": "coldstart",
+   "title": "Deep dive: cold starts and isolation",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Universal shared workers (XFaaS)",
+       "pros": [
+        "Few cold starts: any worker runs any function",
+        "High utilization"
+       ],
+       "cons": [
+        "Weaker isolation; trust model = internal code"
+       ]
+      },
+      {
+       "title": "MicroVM per function (Lambda / Firecracker)",
+       "pros": [
+        "Strong multi-tenant isolation",
+        "Fast (~100 ms) VM boot"
+       ],
+       "cons": [
+        "More cold starts per function",
+        "Idle per-function capacity"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Keep code bundles cached locally on workers; JIT warmup and snapshot/restore reduce startup.",
+      "Locality: send a function to workers that recently ran it."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Function bug floods downstream",
+       "Downstream outage",
+       "Per-function and per-downstream rate limits, circuit breakers"
+      ],
+      [
+       "Worker crash mid-call",
+       "Lost execution",
+       "At-least-once retry; functions must be idempotent (idempotency key)"
+      ],
+      [
+       "Region outage",
+       "Queued work stuck",
+       "Replicated queues; global scheduler reroutes"
+      ],
+      [
+       "Retry storms",
+       "Amplified load",
+       "Exponential backoff + jitter, retry budget, DLQ"
+      ],
+      [
+       "Noisy neighbour",
+       "Latency for others",
+       "Resource limits (cgroups), fair-share scheduling"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Invocation path",
+       "Queue everything",
+       "A few ms on sync calls"
+      ],
+      [
+       "Workers",
+       "Universal warm pools",
+       "Hard isolation"
+      ],
+      [
+       "Capacity",
+       "Size near average + defer",
+       "Immediate execution for low-priority calls"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Deploy, invoke sync/async, schedule, retries."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Utilization, scale, protect downstreams."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "10M/s peak, 4× peak:avg."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "invoke with mode + deadline; durable queue."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Submitter → queues → scheduler → workers."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Time/space shifting, cold starts vs isolation, downstream protection."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Retry storms, queue age metrics, utilization."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you guarantee a function runs exactly once?",
+       "a": "You can't in general; deliver at-least-once and require idempotency keys stored by the function or platform."
+      },
+      {
+       "q": "How do you autoscale?",
+       "a": "On queue depth × age vs deadline, not CPU; keep headroom for sync traffic."
+      },
+      {
+       "q": "Sync calls through a queue — isn't that slow?",
+       "a": "An in-memory fast path for sync, critical calls; durable queue for async."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Queue every invocation; deadlines define slack.",
+      "Time-shift and space-shift deferrable work.",
+      "Universal warm workers kill most cold starts.",
+      "Protect downstreams with adaptive rate limits.",
+      "At-least-once + idempotent functions.",
+      "Scale on queue age, not CPU."
+     ]
+    }
+   ]
+  }
+ ]
+}

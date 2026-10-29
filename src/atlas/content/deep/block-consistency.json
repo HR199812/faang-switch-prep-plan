@@ -1,0 +1,215 @@
+{
+ "minutes": 14,
+ "sections": [
+  {
+   "id": "cap",
+   "title": "CAP, stated correctly",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "CAP says that during a **network partition** (some nodes can't reach others), a distributed system must choose between **consistency** (every read sees the latest write, or errors) and **availability** (every request gets a non-error response, possibly stale). Partitions aren't optional in real networks, so the real choice is C or A *when a partition happens*."
+    },
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "CP (choose consistency)",
+       "pros": [
+        "No stale or conflicting data",
+        "Examples: ZooKeeper, etcd, Spanner, HBase"
+       ],
+       "cons": [
+        "The minority side of a partition refuses requests"
+       ]
+      },
+      {
+       "title": "AP (choose availability)",
+       "pros": [
+        "Always accepts reads and writes",
+        "Examples: Cassandra, DynamoDB (default), Riak"
+       ],
+       "cons": [
+        "Stale reads and conflicting writes to reconcile later"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Saying \"we'll pick CA\". A distributed system can't opt out of partitions; CA only describes a single-node system."
+    }
+   ]
+  },
+  {
+   "id": "pacelc",
+   "title": "PACELC: the trade-off you face every day",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "PACELC extends CAP: if there's a **P**artition, choose **A** or **C**; **E**lse (normal operation), choose **L**atency or **C**onsistency. Even without failures, waiting for replicas to confirm a write (consistency) costs latency. DynamoDB and Cassandra are PA/EL; Spanner is PC/EC; MongoDB with majority writes is PC/EC."
+    }
+   ]
+  },
+  {
+   "id": "models",
+   "title": "The spectrum of consistency models",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Model",
+      "Guarantee",
+      "Example"
+     ],
+     "rows": [
+      [
+       "Linearizable (strong)",
+       "Behaves like a single copy; reads see the latest completed write",
+       "etcd, Spanner, a single Postgres primary"
+      ],
+      [
+       "Sequential",
+       "All nodes see operations in the same order (not necessarily real time)",
+       "ZooKeeper writes"
+      ],
+      [
+       "Causal",
+       "If A caused B, everyone sees A before B",
+       "Comment replies after posts"
+      ],
+      [
+       "Read-your-writes",
+       "You always see your own updates",
+       "Profile edits"
+      ],
+      [
+       "Monotonic reads",
+       "You never see data go backwards",
+       "Sticky replica reads"
+      ],
+      [
+       "Eventual",
+       "If writes stop, replicas converge",
+       "DNS, Cassandra ONE"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Most products need strong consistency for a few operations (payments, inventory, usernames) and are fine with eventual consistency everywhere else. Say which is which."
+    }
+   ]
+  },
+  {
+   "id": "example",
+   "title": "A concrete partition scenario",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "User A",
+      "Replica (EU)",
+      "Replica (US)",
+      "User B"
+     ],
+     "steps": [
+      {
+       "from": "Replica (EU)",
+       "to": "Replica (US)",
+       "label": "replication ✕",
+       "note": "network partition",
+       "dashed": true
+      },
+      {
+       "from": "User A",
+       "to": "Replica (EU)",
+       "label": "set name = 'Ana'"
+      },
+      {
+       "from": "User B",
+       "to": "Replica (US)",
+       "label": "set name = 'Anna'"
+      },
+      {
+       "from": "Replica (EU)",
+       "to": "Replica (US)",
+       "label": "heal: exchange versions"
+      },
+      {
+       "from": "Replica (US)",
+       "to": "Replica (EU)",
+       "label": "conflict → LWW / merge",
+       "note": "one write may be lost",
+       "dashed": true
+      }
+     ],
+     "caption": "AP system during a partition: both sides accept writes"
+    },
+    {
+     "t": "p",
+     "text": "A CP system would instead reject one side's write (the side without a quorum), so users there see errors but nobody sees conflicting data."
+    }
+   ]
+  },
+  {
+   "id": "tunable",
+   "title": "Tunable consistency",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Cassandra level",
+      "Meaning",
+      "Use"
+     ],
+     "rows": [
+      [
+       "ONE",
+       "One replica acknowledges",
+       "Fast, may be stale"
+      ],
+      [
+       "QUORUM",
+       "Majority of replicas",
+       "Strong-ish if both reads and writes use it"
+      ],
+      [
+       "LOCAL_QUORUM",
+       "Majority in the local datacenter",
+       "Multi-region with local latency"
+      ],
+      [
+       "ALL",
+       "Every replica",
+       "Rare; any replica down blocks the operation"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "interview",
+   "title": "How to talk about it",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "For the booking itself I need linearizability — no double-sold seats — so that path uses a single-leader database with transactions. Feeds, counts and search can be eventually consistent with a few seconds of lag."
+    },
+    {
+     "t": "list",
+     "items": [
+      "Name the operations that need strong consistency and why.",
+      "Name the anomaly you accept elsewhere and why users won't notice.",
+      "Mention the mechanism: quorums, leader reads, consensus, or CRDT merges."
+     ]
+    }
+   ]
+  }
+ ]
+}

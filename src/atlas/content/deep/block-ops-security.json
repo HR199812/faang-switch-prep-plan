@@ -1,0 +1,221 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "pillars",
+   "title": "The three pillars of observability",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Signal",
+      "Answers",
+      "Tools"
+     ],
+     "rows": [
+      [
+       "Metrics",
+       "Is something wrong? (rates, errors, latency, saturation)",
+       "Prometheus, Datadog, CloudWatch"
+      ],
+      [
+       "Logs",
+       "What exactly happened in this request?",
+       "ELK / OpenSearch, Loki, Splunk"
+      ],
+      [
+       "Traces",
+       "Where did the time go across services?",
+       "OpenTelemetry → Jaeger, Tempo, Honeycomb"
+      ]
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "**RED** for services: Rate, Errors, Duration. **USE** for resources: Utilisation, Saturation, Errors.",
+      "Structured (JSON) logs with a request/trace id on every line.",
+      "Percentiles (p50/p95/p99), not averages — averages hide the slow tail users feel."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tracing",
+   "title": "Distributed tracing",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Browser",
+      "Gateway",
+      "Orders",
+      "Payments",
+      "DB"
+     ],
+     "steps": [
+      {
+       "from": "Browser",
+       "to": "Gateway",
+       "label": "POST /checkout",
+       "note": "traceparent: 4bf9…"
+      },
+      {
+       "from": "Gateway",
+       "to": "Orders",
+       "label": "span: create order"
+      },
+      {
+       "from": "Orders",
+       "to": "DB",
+       "label": "span: INSERT (12 ms)"
+      },
+      {
+       "from": "Orders",
+       "to": "Payments",
+       "label": "span: charge (480 ms)",
+       "note": "the slow hop"
+      },
+      {
+       "from": "Payments",
+       "to": "Orders",
+       "label": "ok",
+       "dashed": true
+      },
+      {
+       "from": "Orders",
+       "to": "Gateway",
+       "label": "201",
+       "dashed": true
+      }
+     ],
+     "caption": "One trace id follows the request"
+    },
+    {
+     "t": "p",
+     "text": "Each service creates a span with timing and attributes and propagates the trace context in headers (W3C traceparent). Sampling (e.g. keep 1% plus all errors and slow requests) keeps costs manageable."
+    }
+   ]
+  },
+  {
+   "id": "slo",
+   "title": "SLIs, SLOs and alerting",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**SLI:** a measured indicator, e.g. % of requests under 300 ms and non-5xx.",
+      "**SLO:** the target, e.g. 99.9% over 30 days → an **error budget** of 0.1% (~43 minutes).",
+      "Alert on **burn rate** of the error budget (fast burn pages someone; slow burn opens a ticket) rather than on every CPU spike.",
+      "Every alert should be actionable and link to a runbook."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "authn",
+   "title": "Authentication and authorisation",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Server-side sessions",
+       "pros": [
+        "Easy revocation",
+        "Small cookie"
+       ],
+       "cons": [
+        "Session store lookup per request"
+       ]
+      },
+      {
+       "title": "JWT access tokens",
+       "pros": [
+        "Stateless verification at any service"
+       ],
+       "cons": [
+        "Hard to revoke before expiry — keep them short-lived (5–15 min) with refresh tokens"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "**OAuth 2.0 / OIDC** for delegated access and SSO; PKCE for mobile/SPA clients.",
+      "Authorise every request on the server (RBAC/ABAC); never trust client-side checks.",
+      "Service-to-service identity via mTLS (service mesh) or signed workload tokens."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "security",
+   "title": "Security checklist interviewers like to hear",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Area",
+      "Practice"
+     ],
+     "rows": [
+      [
+       "Transport",
+       "TLS everywhere; HSTS; mTLS internally where possible"
+      ],
+      [
+       "Data at rest",
+       "Encryption with KMS-managed keys; per-tenant keys for sensitive data"
+      ],
+      [
+       "Secrets",
+       "Secret manager (Vault, AWS Secrets Manager), never in code or images"
+      ],
+      [
+       "Input",
+       "Validate and parameterise queries (SQL injection), encode output (XSS), CSRF tokens"
+      ],
+      [
+       "Abuse",
+       "Rate limiting, WAF, bot detection, CAPTCHAs on sensitive endpoints"
+      ],
+      [
+       "Least privilege",
+       "Scoped IAM roles per service; short-lived credentials"
+      ],
+      [
+       "Audit",
+       "Immutable audit logs for admin and data access"
+      ],
+      [
+       "PII",
+       "Minimise, tokenise, set retention; support deletion requests"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd instrument every service with OpenTelemetry for traces and RED metrics, alert on SLO burn rate, use short-lived JWTs issued by an OIDC provider, mTLS between services, and keep secrets in a managed vault."
+    }
+   ]
+  },
+  {
+   "id": "deploy",
+   "title": "Safe deployments",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Canary or blue/green releases with automated rollback on SLO regression.",
+      "Feature flags to decouple deploy from release and to kill features quickly.",
+      "Backward-compatible database migrations (expand → migrate → contract)."
+     ]
+    }
+   ]
+  }
+ ]
+}

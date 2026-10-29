@@ -1,0 +1,395 @@
+{
+ "id": "payment-system",
+ "num": 28,
+ "title": "Payment System (Stripe)",
+ "summary": "Move money exactly once: idempotent payment intents, a state machine around an external payment processor, a double-entry ledger, webhooks, and daily reconciliation.",
+ "tags": [
+  "Idempotency",
+  "Ledger",
+  "State machine",
+  "Reconciliation"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "resilience",
+  "transactions-locks",
+  "patterns",
+  "queues-kafka",
+  "consistency"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Merchants create payments, customers pay by card; refunds"
+      ],
+      [
+       "Functional",
+       "Notify merchants of outcomes (webhooks); merchant balances and payouts"
+      ],
+      [
+       "Non-functional",
+       "Never charge twice; never lose a payment (correctness over latency)"
+      ],
+      [
+       "Non-functional",
+       "Auditable: every balance derivable from immutable entries"
+      ],
+      [
+       "Non-functional",
+       "PCI scope minimised — raw card numbers in as few systems as possible"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Payments",
+       "value": "~1B / year",
+       "sub": "~30/s avg"
+      },
+      {
+       "label": "Peak",
+       "value": "~1k/s",
+       "sub": "Black Friday"
+      },
+      {
+       "label": "Ledger entries",
+       "value": "≥ 2 per movement",
+       "sub": "double entry"
+      },
+      {
+       "label": "Retention",
+       "value": "7+ years",
+       "sub": "regulatory"
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Volume is modest; the difficulty is correctness across unreliable networks and external systems."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/payment_intents       Idempotency-Key: <uuid>\n     {amount: 2000, currency: \"usd\", customer, payment_method}\n     -> {id: \"pi_123\", status: \"requires_confirmation\"}\nPOST /v1/payment_intents/pi_123/confirm   Idempotency-Key: <uuid>\n     -> {status: \"processing\" | \"succeeded\" | \"requires_action\"}\nPOST /v1/refunds  {payment_intent, amount}  Idempotency-Key: <uuid>"
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Idempotency keys are stored with the request hash and the response. A retry with the same key returns the stored response — even if the first attempt is still running (return 409 / in-progress)."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Merchant server",
+        "kind": "client"
+       },
+       {
+        "label": "Checkout page / SDK",
+        "kind": "client",
+        "sub": "tokenises card"
+       }
+      ],
+      [
+       {
+        "label": "API gateway",
+        "kind": "edge",
+        "sub": "auth, idempotency"
+       }
+      ],
+      [
+       {
+        "label": "Payment service",
+        "kind": "service",
+        "sub": "intent state machine"
+       },
+       {
+        "label": "Token vault",
+        "kind": "store",
+        "sub": "PCI zone"
+       }
+      ],
+      [
+       {
+        "label": "Payment processor / card network",
+        "kind": "ext"
+       },
+       {
+        "label": "Ledger service",
+        "kind": "db",
+        "sub": "double entry, append-only"
+       }
+      ],
+      [
+       {
+        "label": "Outbox → event bus",
+        "kind": "queue"
+       },
+       {
+        "label": "Webhook service",
+        "kind": "service",
+        "sub": "retries"
+       },
+       {
+        "label": "Reconciliation jobs",
+        "kind": "service"
+       }
+      ]
+     ],
+     "caption": "Money movement path"
+    }
+   ]
+  },
+  {
+   "id": "deep-state",
+   "title": "Deep dive: state machine and exactly-once effects",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Create",
+       "text": "Insert the intent with status `requires_confirmation` and the idempotency key (unique constraint)."
+      },
+      {
+       "title": "Confirm",
+       "text": "Move to `processing` and persist the outgoing processor request id *before* calling the processor."
+      },
+      {
+       "title": "Call processor",
+       "text": "Send the request with our own idempotency key; processors dedupe on it."
+      },
+      {
+       "title": "Unknown outcome",
+       "text": "On timeout, do not retry blindly — query the processor by our request id, or let reconciliation settle it."
+      },
+      {
+       "title": "Record",
+       "text": "On success write ledger entries and status `succeeded` in one transaction, plus an outbox event."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Treating a timeout as a failure and letting the customer retry. The first attempt may have succeeded — that's how double charges happen."
+    }
+   ]
+  },
+  {
+   "id": "deep-ledger",
+   "title": "Deep dive: double-entry ledger",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "entry_id",
+      "transaction_id",
+      "account",
+      "debit",
+      "credit"
+     ],
+     "rows": [
+      [
+       "1",
+       "tx_9",
+       "customer_card_receivable",
+       "20.00",
+       ""
+      ],
+      [
+       "2",
+       "tx_9",
+       "merchant_balance",
+       "",
+       "19.42"
+      ],
+      [
+       "3",
+       "tx_9",
+       "fees_revenue",
+       "",
+       "0.58"
+      ]
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Every transaction's debits equal its credits; balances are sums over entries — never mutable counters as the source of truth.",
+      "Entries are immutable; corrections are new reversing entries.",
+      "Store amounts as integers in minor units (cents) with a currency code — never floats."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "deep-recon",
+   "title": "Deep dive: webhooks and reconciliation",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Webhooks: at-least-once delivery from the outbox with exponential backoff for days; merchants must dedupe on event id; sign payloads (HMAC).",
+      "Reconciliation: each day, match processor settlement files against the ledger; mismatches go to an exceptions queue (auto-fix where rules allow, otherwise humans).",
+      "Reconciliation is what catches every case the online path got wrong — design for it, don't bolt it on."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Shard intents and ledger by merchant/account; keep a transaction's entries on one shard.",
+      "Processor outages: route to a secondary processor where possible; queue confirmations.",
+      "Hot merchant accounts: batch ledger writes or use sub-accounts summed periodically.",
+      "PCI: tokenise at the edge so only the vault sees PANs."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Synchronous confirm",
+       "pros": [
+        "Simple UX — immediate result"
+       ],
+       "cons": [
+        "Long-tail processor latency hits the merchant's request"
+       ]
+      },
+      {
+       "title": "Async with webhooks",
+       "pros": [
+        "Resilient to slow processors; handles 3-D Secure flows"
+       ],
+       "cons": [
+        "Merchants must handle eventual outcomes"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "Card payments, refunds, webhooks, payouts?"
+      },
+      {
+       "min": "5–10",
+       "title": "Correctness goals",
+       "text": "No double charge, auditability, PCI."
+      },
+      {
+       "min": "10–20",
+       "title": "API + HLD",
+       "text": "Idempotency keys, intents, processor, ledger."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "State machine + unknown outcomes; double entry."
+      },
+      {
+       "min": "35–45",
+       "title": "Ops",
+       "text": "Webhooks, reconciliation, sharding."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How long do you keep idempotency keys?",
+       "a": "24 hours is typical — long enough to cover client retries."
+      },
+      {
+       "q": "How do you handle currency conversion?",
+       "a": "Record both legs with the FX rate used as separate ledger entries; never mutate."
+      },
+      {
+       "q": "How do payouts work?",
+       "a": "A scheduled job sums available merchant balance, creates a payout transaction (ledger entries) and calls the bank via a payout rail."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Idempotency key on every mutating call — ours and the processor's.",
+      "Persist intent before calling out; query on timeout.",
+      "Double-entry, immutable, integer minor units.",
+      "Outbox → webhooks (signed, retried).",
+      "Daily reconciliation is part of the design."
+     ]
+    }
+   ]
+  }
+ ]
+}

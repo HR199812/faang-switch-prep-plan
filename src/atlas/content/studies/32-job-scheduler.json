@@ -1,0 +1,328 @@
+{
+ "id": "job-scheduler",
+ "num": 32,
+ "title": "Distributed Job Scheduler",
+ "summary": "Run millions of one-off and cron jobs on time and at least once: a durable job store indexed by run time, partitioned schedulers that claim due jobs with leases, a work queue, idempotent workers, retries and visibility.",
+ "tags": [
+  "Scheduling",
+  "Leases",
+  "Queues",
+  "Retries"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "workflows",
+  "queues-kafka",
+  "consensus",
+  "resilience",
+  "databases"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Submit a job to run now, at a time, or on a cron schedule"
+      ],
+      [
+       "Functional",
+       "Retries with backoff, timeouts, cancellation; view status and history"
+      ],
+      [
+       "Non-functional",
+       "Jobs start within ~1–2 s of their scheduled time"
+      ],
+      [
+       "Non-functional",
+       "At-least-once execution; no job silently lost"
+      ],
+      [
+       "Non-functional",
+       "~10k jobs/s at peak; horizontal scale"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Jobs / day",
+       "value": "~500M"
+      },
+      {
+       "label": "Peak start rate",
+       "value": "~10k/s",
+       "sub": "top of the hour"
+      },
+      {
+       "label": "Job record",
+       "value": "~1 KB"
+      },
+      {
+       "label": "History",
+       "value": "~30 days",
+       "sub": "~15 TB"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Cron jobs cluster on round times (every hour at :00). Plan for the top-of-the-hour spike, and jitter where the user allows it."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /jobs {name, payload, schedule: \"0 * * * *\" | run_at, max_retries, timeout_s, idempotency_key}\nGET  /jobs/{id}            -> definition + next_run_at\nGET  /jobs/{id}/runs       -> [{run_id, status, started_at, attempts, error}]\nPOST /jobs/{id}/cancel"
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Clients",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Job API",
+        "kind": "edge"
+       }
+      ],
+      [
+       {
+        "label": "Job store",
+        "kind": "db",
+        "sub": "index on (partition, next_run_at)"
+       }
+      ],
+      [
+       {
+        "label": "Scheduler shards",
+        "kind": "service",
+        "sub": "poll due jobs, lease"
+       }
+      ],
+      [
+       {
+        "label": "Work queue",
+        "kind": "queue",
+        "sub": "SQS / Kafka"
+       }
+      ],
+      [
+       {
+        "label": "Workers",
+        "kind": "service",
+        "sub": "heartbeat, idempotent"
+       },
+       {
+        "label": "Run history",
+        "kind": "db"
+       }
+      ]
+     ],
+     "caption": "Store → claim due jobs → queue → workers"
+    }
+   ]
+  },
+  {
+   "id": "deep-claim",
+   "title": "Deep dive: claiming due jobs exactly once (mostly)",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Partition",
+       "text": "Jobs are hashed into N partitions; each scheduler instance owns a set of partitions via leader election / leases (ZooKeeper, etcd, or a DB lease table)."
+      },
+      {
+       "title": "Poll",
+       "text": "Every second: SELECT jobs WHERE partition IN (mine) AND next_run_at <= now() ORDER BY next_run_at LIMIT 1000 FOR UPDATE SKIP LOCKED."
+      },
+      {
+       "title": "Enqueue",
+       "text": "Create a run row and push to the work queue; compute and store the next next_run_at for cron jobs in the same transaction."
+      },
+      {
+       "title": "Execute",
+       "text": "Workers take a visibility timeout / lease on the run, heartbeat while running, mark success or failure."
+      },
+      {
+       "title": "Recover",
+       "text": "If a heartbeat stops, the run becomes visible again and is retried — hence at-least-once and idempotent jobs."
+      }
+     ]
+    },
+    {
+     "t": "code",
+     "lang": "sql",
+     "text": "SELECT id FROM jobs\n WHERE partition = ANY($1) AND next_run_at <= now() AND status = 'scheduled'\n ORDER BY next_run_at\n LIMIT 1000\n FOR UPDATE SKIP LOCKED;"
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Tip",
+     "text": "For far-future timers at huge scale, a **timing wheel** or bucketed time index (jobs grouped per minute) avoids scanning a giant sorted index."
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Scheduler shard dies → its lease expires → another instance takes the partitions (a few seconds of delay).",
+      "Duplicate execution is possible (lease expiry while still running) — require idempotency keys or fencing tokens for side effects.",
+      "Retries: exponential backoff with jitter; poison jobs go to a dead-letter queue after max attempts.",
+      "Separate queues per priority/tenant to prevent one tenant's 1M-job burst from starving others."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "DB polling",
+       "pros": [
+        "Simple, transactional",
+        "Easy queries for status"
+       ],
+       "cons": [
+        "Index hot spot at now(); polling cost"
+       ]
+      },
+      {
+       "title": "Delay queues / timing wheel",
+       "pros": [
+        "Push-based, scales for timers"
+       ],
+       "cons": [
+        "Harder cancellation, querying and rescheduling"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The store is the source of truth for when; the queue is just the hand-off for who. Leases plus idempotent workers give at-least-once without losing jobs."
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "One-off + cron, retries, latency tolerance."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Start rate, top-of-hour spike."
+      },
+      {
+       "min": "10–20",
+       "title": "HLD",
+       "text": "Store, scheduler shards, queue, workers."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dive",
+       "text": "SKIP LOCKED claim, leases, heartbeats."
+      },
+      {
+       "min": "35–45",
+       "title": "Failure",
+       "text": "Duplicates, DLQ, multi-tenant isolation."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you support DAGs of jobs?",
+       "a": "That's a workflow engine: persist each step's state and trigger children on completion (Airflow, Temporal)."
+      },
+      {
+       "q": "How do you cancel a running job?",
+       "a": "Set a cancel flag; workers check it on heartbeat and stop; the scheduler won't enqueue future runs."
+      },
+      {
+       "q": "Exactly-once?",
+       "a": "Not across arbitrary side effects; at-least-once + idempotency (or transactional outbox) is the practical answer."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Index on next_run_at; partitions owned by scheduler leases.",
+      "FOR UPDATE SKIP LOCKED to claim.",
+      "Visibility timeout + heartbeats.",
+      "At-least-once → idempotent jobs, fencing tokens.",
+      "Backoff, DLQ, per-tenant queues."
+     ]
+    }
+   ]
+  }
+ ]
+}

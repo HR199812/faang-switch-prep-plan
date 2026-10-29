@@ -1,0 +1,346 @@
+{
+ "id": "yelp-proximity",
+ "num": 26,
+ "title": "Yelp / Proximity Service",
+ "summary": "Find nearby businesses fast: a read-heavy geospatial index (geohash or quadtree) kept in memory, a business DB as source of truth, ranking by distance and rating, and reviews as a separate write path.",
+ "tags": [
+  "Geohash",
+  "Quadtree",
+  "Read-heavy",
+  "Search"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "geospatial",
+  "caching",
+  "search",
+  "databases",
+  "replication"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Search businesses near a location within a radius, optionally by category/keyword"
+      ],
+      [
+       "Functional",
+       "View business details, photos and reviews; write reviews"
+      ],
+      [
+       "Functional",
+       "Business owners add/update listings (changes visible within minutes is fine)"
+      ],
+      [
+       "Non-functional",
+       "Search p99 < 200 ms; very read-heavy (~100:1)"
+      ],
+      [
+       "Non-functional",
+       "Highly available; eventual consistency for listings is acceptable"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Businesses",
+       "value": "~200M",
+       "sub": "~1 KB each"
+      },
+      {
+       "label": "Search QPS",
+       "value": "~5k avg",
+       "sub": "~20k peak"
+      },
+      {
+       "label": "Index size",
+       "value": "~10 GB",
+       "sub": "id + lat/lng + cell"
+      },
+      {
+       "label": "Reviews",
+       "value": "~100M/yr",
+       "sub": "write path"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "The whole geo index (business id + coordinates) fits in memory on one machine. Scale reads with replicas, not by sharding the index."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "GET  /v1/search?lat=..&lng=..&radius=2000&q=coffee&page_token=..\n     -> {businesses: [{id, name, distance_m, rating, ...}], next_page_token}\nGET  /v1/businesses/{id}\nPOST /v1/businesses/{id}/reviews   {rating, text}"
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Mobile / web",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "API gateway + LB",
+        "kind": "edge"
+       }
+      ],
+      [
+       {
+        "label": "Location service",
+        "kind": "service",
+        "sub": "geo index in memory"
+       },
+       {
+        "label": "Business service",
+        "kind": "service",
+        "sub": "details, reviews"
+       }
+      ],
+      [
+       {
+        "label": "Geo index replicas",
+        "kind": "cache",
+        "sub": "geohash → ids"
+       },
+       {
+        "label": "Business DB",
+        "kind": "db",
+        "sub": "primary + read replicas"
+       },
+       {
+        "label": "Search engine",
+        "kind": "service",
+        "sub": "keyword / category"
+       }
+      ]
+     ],
+     "caption": "Read path vs write path"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Search: compute the user's geohash cell and its 8 neighbours → fetch candidate ids → filter by exact distance → rank → hydrate details from cache.",
+      "Listing updates write to the DB; a nightly or streaming job rebuilds/updates the geo index."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "deep-geo",
+   "title": "Deep dive: geohash vs quadtree",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Geohash (fixed grid)",
+       "pros": [
+        "Simple: cell = string prefix, store in any KV / SQL index",
+        "Easy neighbour lookup"
+       ],
+       "cons": [
+        "Fixed cell size: dense cities have huge cells, rural areas tiny ones",
+        "Edge effects at cell boundaries — always query neighbours"
+       ]
+      },
+      {
+       "title": "Quadtree (adaptive)",
+       "pros": [
+        "Cells split when they exceed N businesses, so density adapts",
+        "Good for k-nearest queries"
+       ],
+       "cons": [
+        "In-memory tree to build and rebuild",
+        "Updates are trickier"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Choose the geohash precision from the radius: precision 6 cells are ~1.2 km × 0.6 km; for a 2 km radius search precision 5 or 6 plus neighbours.",
+      "If too few results, widen to a coarser precision; if too many, rank and paginate.",
+      "Google S2 / Uber H3 are production alternatives with better cell shapes."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Query the user's cell plus its eight neighbours, then filter by real distance — the grid is only a pre-filter."
+    }
+   ]
+  },
+  {
+   "id": "deep-ranking",
+   "title": "Deep dive: ranking and keyword search",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Score = f(distance, rating, review count, open now, personalization); compute on the candidate set only.",
+      "Keyword + category search lives in Elasticsearch/OpenSearch with a geo_distance filter — fine to use instead of a hand-rolled index if you say why.",
+      "Cache popular (cell, category) results for minutes; business details cache by id."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Geo index: replicate per region; rebuild from the DB is the recovery path.",
+      "Business DB: read replicas for details; shard reviews by business_id.",
+      "Average rating: maintain (sum, count) counters updated on review write rather than recomputing.",
+      "Hot spots (Times Square) are read hot spots — caching handles them."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Custom in-memory index",
+       "pros": [
+        "Fast, cheap, simple to reason about"
+       ],
+       "cons": [
+        "You build and operate index refresh"
+       ]
+      },
+      {
+       "title": "Elasticsearch geo queries",
+       "pros": [
+        "Keyword + geo + filters in one system"
+       ],
+       "cons": [
+        "Heavier, eventual consistency, ops cost"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "Radius search, details, reviews; freshness of listings."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Index fits in memory — say it."
+      },
+      {
+       "min": "10–20",
+       "title": "HLD",
+       "text": "Location service vs business service."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dive",
+       "text": "Geohash vs quadtree, neighbours, precision."
+      },
+      {
+       "min": "35–45",
+       "title": "Scale",
+       "text": "Replicas, caching, rating counters."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you return the 10 nearest regardless of radius?",
+       "a": "Expand rings of cells (or walk the quadtree) until you have ≥ 10 candidates, then sort by distance."
+      },
+      {
+       "q": "How is this different from Uber?",
+       "a": "Businesses barely move, so the index is read-optimised and rebuilt periodically; drivers move every few seconds, which needs a write-optimised index."
+      },
+      {
+       "q": "How do you handle a listing edit?",
+       "a": "Write to DB, publish an event, update the affected cell in the index replicas asynchronously."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Read-heavy; geo index fits in memory → replicate.",
+      "Geohash cell + 8 neighbours → exact distance filter → rank.",
+      "Quadtree when density varies a lot.",
+      "Reviews are a separate write path; keep rating counters."
+     ]
+    }
+   ]
+  }
+ ]
+}

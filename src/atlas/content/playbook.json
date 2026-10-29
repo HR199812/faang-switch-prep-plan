@@ -1,0 +1,366 @@
+{
+ "title": "Interview Playbook",
+ "summary": "Everything from the first minute to the last: how to run a 45-minute system design round and what interviewers score.",
+ "sections": [
+  {
+   "id": "timeline",
+   "title": "The 45-minute run",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Functional requirements",
+       "text": "3–5 core features. Say what's out of scope."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional requirements",
+       "text": "Scale, latency, availability, consistency, read:write ratio."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "QPS avg + peak, storage/yr, bandwidth, cache size. Only numbers that change the design."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data model",
+       "text": "4–6 endpoints, core entities, keys, the hot query."
+      },
+      {
+       "min": "17–27",
+       "title": "High-level design",
+       "text": "Boxes and arrows that satisfy every functional requirement. Walk one request end to end."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "2–3 hardest parts: hot path scaling, consistency, failure handling."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Bottlenecks, monitoring, 10× scale, what you'd revisit."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Open with",
+     "text": "\"I'll start by pinning down requirements and scale, sketch an API and data model, draw a simple design that works, then go deep on the two or three hardest parts. Stop me if you want to focus somewhere specific.\""
+    }
+   ]
+  },
+  {
+   "id": "requirements",
+   "title": "Requirement questions",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Ask about",
+      "Example question",
+      "Why it matters"
+     ],
+     "rows": [
+      [
+       "Users & scale",
+       "How many daily users? Peak events?",
+       "Sizes everything"
+      ],
+      [
+       "Core actions",
+       "What are the 3 things a user must do?",
+       "Scopes the design"
+      ],
+      [
+       "Read vs write",
+       "Is this read-heavy?",
+       "Cache vs write path focus"
+      ],
+      [
+       "Latency",
+       "What's acceptable p99 for the main action?",
+       "Sync vs async, caching, CDN"
+      ],
+      [
+       "Consistency",
+       "Can users see stale data? For how long?",
+       "CP vs AP, replication mode"
+      ],
+      [
+       "Availability",
+       "What happens if it's down 5 minutes?",
+       "Redundancy, multi-region"
+      ],
+      [
+       "Data retention",
+       "Keep data forever?",
+       "Storage tiering, TTLs"
+      ],
+      [
+       "Geography",
+       "Global users or one region?",
+       "CDN, geo-replication"
+      ],
+      [
+       "Clients",
+       "Web, mobile, or API consumers?",
+       "Protocols, payload size"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "api-data",
+   "title": "API & data model",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Write endpoints as `VERB /resource` with the request and response fields that matter.",
+      "Name the **hot query** and design keys and indexes for it.",
+      "Pick the store after the access pattern: say why, and what you rejected.",
+      "Mention pagination (cursor), idempotency keys for creates, and auth in one line each."
+     ],
+     "ordered": false
+    },
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/urls          { longUrl, alias?, expiresAt? }  -> 201 { shortUrl }\nGET  /{code}                                             -> 302 Location: longUrl\nGET  /v1/urls/{code}/stats?from=&to=                     -> { clicks, byCountry[] }"
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design template",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Most designs start from the same skeleton. Draw it fast, then bend it to the problem."
+    },
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Clients",
+        "kind": "client",
+        "sub": "web / mobile"
+       }
+      ],
+      [
+       {
+        "label": "CDN",
+        "kind": "edge",
+        "sub": "static + cacheable"
+       },
+       {
+        "label": "API Gateway / LB",
+        "kind": "edge",
+        "sub": "auth, rate limit"
+       }
+      ],
+      [
+       {
+        "label": "Service A",
+        "kind": "service"
+       },
+       {
+        "label": "Service B",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Cache",
+        "kind": "cache",
+        "sub": "Redis"
+       },
+       {
+        "label": "Queue",
+        "kind": "queue",
+        "sub": "Kafka / SQS"
+       }
+      ],
+      [
+       {
+        "label": "Primary DB",
+        "kind": "db",
+        "sub": "+ replicas"
+       },
+       {
+        "label": "Workers",
+        "kind": "service"
+       },
+       {
+        "label": "Object store",
+        "kind": "store"
+       }
+      ]
+     ],
+     "caption": "The default skeleton: add, remove and rename boxes to fit"
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Walk the request",
+     "text": "After drawing, narrate one write and one read through every box. It proves the design works and surfaces gaps before the interviewer does."
+    }
+   ]
+  },
+  {
+   "id": "deep-dives",
+   "title": "Deep-dive menu",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Pick the deep dives that the problem's requirements make hardest. For each: name the bottleneck, list 2–3 options, choose with a trade-off, mention monitoring."
+    },
+    {
+     "t": "table",
+     "head": [
+      "If the problem has…",
+      "Go deep on"
+     ],
+     "rows": [
+      [
+       "Huge read volume",
+       "Caching layers, CDN, read replicas, hot keys"
+      ],
+      [
+       "Huge write volume",
+       "Sharding, LSM stores, batching, queues"
+      ],
+      [
+       "Money or inventory",
+       "Transactions, idempotency, locking, sagas"
+      ],
+      [
+       "Realtime updates",
+       "WebSockets, fan-out, presence, ordering"
+      ],
+      [
+       "Feeds",
+       "Fan-out on write vs read, ranking, celebrity problem"
+      ],
+      [
+       "Location",
+       "Geo-indexing, update frequency, matching"
+      ],
+      [
+       "Media",
+       "Upload pipeline, transcoding, CDN, adaptive bitrate"
+      ],
+      [
+       "Search",
+       "Inverted index, sharding, indexing lag"
+      ],
+      [
+       "Global users",
+       "Multi-region replication, conflict resolution"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "scoring",
+   "title": "What interviewers score",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Signal",
+      "Strong",
+      "Weak"
+     ],
+     "rows": [
+      [
+       "Problem navigation",
+       "Scopes quickly, asks sharp questions",
+       "Starts drawing immediately"
+      ],
+      [
+       "Solution design",
+       "Works end to end, every requirement covered",
+       "Box soup, gaps in flow"
+      ],
+      [
+       "Trade-offs",
+       "\"I pick X over Y because…\"",
+       "Buzzwords without reasons"
+      ],
+      [
+       "Depth",
+       "Goes two levels down on internals",
+       "Stays at box names"
+      ],
+      [
+       "Communication",
+       "Signposts, checks in, drives",
+       "Silent, or waits to be led"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Level calibration",
+     "text": "Mid-level: a working design with sensible components. Senior: drives the interview, proactive trade-offs and failure modes. Staff: frames the problem, reasons about evolution, cost, and organization."
+    }
+   ]
+  },
+  {
+   "id": "phrases",
+   "title": "Phrases that work",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "\"Before I design, let me confirm the scale so I don't over-engineer.\"",
+      "\"The simplest thing that works is X. It breaks at about N QPS, so here's how we scale it.\"",
+      "\"There are two options here. A gives us…, B gives us…. Given our requirement for…, I'd pick B.\"",
+      "\"The bottleneck now is… Let me deep-dive there unless you'd prefer another area.\"",
+      "\"If this node dies, … happens, and we recover by…\"",
+      "\"I'd monitor this with … and alert when …\""
+     ],
+     "ordered": false
+    }
+   ]
+  },
+  {
+   "id": "mistakes",
+   "title": "Common mistakes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Jumping to microservices, Kafka or Kubernetes without a number that demands it.",
+      "Choosing NoSQL \"because it scales\" with no access pattern behind it.",
+      "One database box with no replication, backups, or failover story.",
+      "Spending 15 minutes on estimation math nobody uses.",
+      "Never stating a trade-off, a failure mode, or how you'd monitor.",
+      "Ignoring the interviewer's hints to move on."
+     ],
+     "ordered": false
+    }
+   ]
+  },
+  {
+   "id": "story",
+   "title": "Use your own experience",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Bring one real system into the conversation when it fits: a post-trade pipeline that must not lose or duplicate a trade is a perfect example for idempotency, exactly-once processing, reconciliation and audit trails. Keep it to two sentences, then return to the design."
+    }
+   ]
+  }
+ ]
+}

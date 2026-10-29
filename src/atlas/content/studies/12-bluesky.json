@@ -1,0 +1,401 @@
+{
+ "id": "bluesky",
+ "num": 12,
+ "title": "Bluesky",
+ "summary": "A federated social network on the AT Protocol: users' data lives in portable signed repositories on personal data servers, relays stream a global firehose, and app views and custom feed generators build timelines from it.",
+ "tags": [
+  "Federation",
+  "Firehose",
+  "Feeds",
+  "Identity"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "queues-kafka",
+  "caching",
+  "search",
+  "ops-security"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Post, follow, like, reply; home timeline and custom algorithmic feeds"
+      ],
+      [
+       "Functional",
+       "Account portability: move to another host without losing followers or posts"
+      ],
+      [
+       "Functional",
+       "Composable moderation (labelers) chosen by users"
+      ],
+      [
+       "Non-functional",
+       "Anyone can run any component; no single company owns the data"
+      ],
+      [
+       "Non-functional",
+       "Tens of millions of users; firehose of thousands of events/s"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Users",
+       "value": "~30M+",
+       "sub": "registered"
+      },
+      {
+       "label": "Firehose",
+       "value": "~1–2k events/s",
+       "sub": "avg; spikes higher"
+      },
+      {
+       "label": "Repo size",
+       "value": "KB–MB",
+       "sub": "per user"
+      },
+      {
+       "label": "App view",
+       "value": "full index",
+       "sub": "of all public records"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The firehose is modest in events per second; the design problem is decentralization — trust, identity and letting third parties index and rank the same data."
+    }
+   ]
+  },
+  {
+   "id": "components",
+   "title": "Components",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Component",
+      "Role"
+     ],
+     "rows": [
+      [
+       "PDS (Personal Data Server)",
+       "Hosts users' signed data repositories (Merkle search tree), handles auth"
+      ],
+      [
+       "DID + handle",
+       "Identity is a DID (did:plc / did:web) that points to the current PDS; handle is a DNS name"
+      ],
+      [
+       "Relay",
+       "Crawls PDSs and emits one aggregated firehose of repo commits"
+      ],
+      [
+       "App View",
+       "Consumes the firehose, builds indexes (profiles, threads, follower graph, timelines), serves the app API"
+      ],
+      [
+       "Feed generator",
+       "Third-party service that returns a ranked list of post URIs for a custom feed"
+      ],
+      [
+       "Labeler",
+       "Publishes moderation labels clients can subscribe to"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Client app",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "PDS",
+        "kind": "service",
+        "sub": "user repos"
+       }
+      ],
+      [
+       {
+        "label": "Relay",
+        "kind": "queue",
+        "sub": "firehose (WebSocket)"
+       }
+      ],
+      [
+       {
+        "label": "App View",
+        "kind": "service",
+        "sub": "indexes + API"
+       },
+       {
+        "label": "Feed generators",
+        "kind": "ext",
+        "sub": "custom ranking"
+       },
+       {
+        "label": "Labelers",
+        "kind": "ext",
+        "sub": "moderation"
+       }
+      ],
+      [
+       {
+        "label": "Index DB",
+        "kind": "db",
+        "sub": "Postgres / Scylla"
+       },
+       {
+        "label": "Caches",
+        "kind": "cache"
+       }
+      ]
+     ],
+     "caption": "Write to your PDS; everyone else reads the firehose"
+    },
+    {
+     "t": "list",
+     "items": [
+      "User posts → client writes a record to their repo on the PDS; the PDS signs a new commit.",
+      "Relay subscribes to PDSs and rebroadcasts commits on the firehose.",
+      "App View ingests, updates indexes (author feeds, follow graph, threads, counts).",
+      "Home timeline: App View builds the following feed; custom feeds call a feed generator for URIs, then App View hydrates them."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "data",
+   "title": "Deep dive: repos, identity and portability",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Each user's repo is a signed Merkle structure of records (`app.bsky.feed.post/<rkey>`), so anyone can verify authenticity without trusting the host.",
+      "DID document lists the signing key and current PDS; migrating = copy repo to a new PDS and update the DID document.",
+      "Handles are verified via DNS TXT or HTTPS well-known file."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key idea",
+     "text": "Separating identity (DID), storage (PDS) and indexing (App View) is what makes accounts portable and lets many apps share one network."
+    }
+   ]
+  },
+  {
+   "id": "feeds",
+   "title": "Deep dive: timelines and custom feeds",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Following feed: App View can fan out on write into per-user timeline caches, or merge on read from followed authors (hybrid, like Twitter).",
+      "Feed generators consume the firehose themselves and maintain their own index, returning `[{post: uri}]` + cursor via `getFeedSkeleton`.",
+      "App View hydrates skeletons (post content, counts, viewer state) and applies the viewer's blocks, mutes and labels.",
+      "Cursor-based pagination everywhere; feed generators are untrusted so App View enforces timeouts."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Custom feeds are just a skeleton API: a third party returns post URIs and the App View hydrates and filters them, so ranking is pluggable without sharing the whole database."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Relay down",
+       "Indexers stop receiving",
+       "Multiple relays; consumers resume from cursor (sequence number)"
+      ],
+      [
+       "Malicious PDS spam",
+       "Firehose abuse",
+       "Relay rate limits per PDS, labelers, account takedowns at App View"
+      ],
+      [
+       "Slow feed generator",
+       "Feed loads slowly",
+       "Timeouts, cached skeletons, fallback message"
+      ],
+      [
+       "Viral post",
+       "Hot counters",
+       "Aggregate like/repost counts async, cache"
+      ],
+      [
+       "PDS hosting a user disappears",
+       "User data unavailable",
+       "User keeps a backup/rotation key; migrate repo to new PDS"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Architecture",
+       "Federated, open firehose",
+       "Central control and privacy of public data"
+      ],
+      [
+       "Indexing",
+       "Big App Views",
+       "Pure peer-to-peer"
+      ],
+      [
+       "Feeds",
+       "Pluggable generators",
+       "Uniform latency"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Social basics + portability + custom feeds."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Decentralized, verifiable, scalable."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "Firehose rate, index size."
+      },
+      {
+       "min": "12–17",
+       "title": "Components",
+       "text": "DID, PDS, relay, App View, feed gens, labelers."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Write to PDS, read via firehose indexes."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Signed repos + migration, feed skeletons, moderation."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Relay redundancy, spam, cursors."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How is this different from Mastodon (ActivityPub)?",
+       "a": "Mastodon servers push to each other and own accounts; AT Protocol separates hosting from indexing via a global firehose, and identity is portable."
+      },
+      {
+       "q": "How do you resume the firehose after a crash?",
+       "a": "Each event has a sequence number; consumers store their cursor and reconnect with `cursor=N`."
+      },
+      {
+       "q": "How do blocks work if data is public?",
+       "a": "Blocks are records too; App View enforces them in hydration and thread views."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "DID = identity, PDS = storage, relay = firehose, App View = index.",
+      "Signed Merkle repos → verifiable, portable data.",
+      "Custom feeds return URI skeletons; App View hydrates.",
+      "Moderation is composable via labelers.",
+      "Firehose consumers resume by cursor."
+     ]
+    }
+   ]
+  }
+ ]
+}

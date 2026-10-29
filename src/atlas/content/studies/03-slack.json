@@ -1,0 +1,466 @@
+{
+ "id": "slack",
+ "num": 3,
+ "title": "Slack",
+ "summary": "Workspace chat at scale: persistent WebSocket gateways, channel-partitioned message storage, and pub/sub fan-out to the online members of each channel.",
+ "tags": [
+  "WebSockets",
+  "Fan-out",
+  "Sharding",
+  "Presence"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "apis-realtime",
+  "sharding",
+  "queues-kafka",
+  "caching",
+  "search"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Send and receive messages in channels and DMs in real time"
+      ],
+      [
+       "Functional",
+       "Message history with infinite scroll; threads and reactions"
+      ],
+      [
+       "Functional",
+       "Presence (online/away), typing indicators, unread counts"
+      ],
+      [
+       "Functional",
+       "Search messages within a workspace"
+      ],
+      [
+       "Non-functional",
+       "Delivery to online members < 500 ms p99"
+      ],
+      [
+       "Non-functional",
+       "Messages never lost; order preserved within a channel"
+      ],
+      [
+       "Non-functional",
+       "Workspaces up to 500k members; channels up to 100k members"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Real Slack routes messages through channel servers and gateway servers and stores data in MySQL sharded with Vitess; this design follows that shape and generalizes where details aren't public."
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Concurrent users",
+       "value": "20M",
+       "sub": "WebSocket connections"
+      },
+      {
+       "label": "Messages / day",
+       "value": "2B",
+       "sub": "≈ 23k/s, ~70k peak"
+      },
+      {
+       "label": "Fan-out deliveries",
+       "value": "~1M/s",
+       "sub": "avg ~40 online recipients"
+      },
+      {
+       "label": "Gateways",
+       "value": "~400",
+       "sub": "at 50k conns each"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Writes are modest at 70k a second; the expensive part is fan-out, about a million deliveries a second, and holding 20 million persistent connections."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /api/chat.postMessage   { channel, text, threadTs?, clientMsgId }   -> { ts }\nGET  /api/conversations.history?channel&cursor&limit=50\nWS   wss://gateway/…  server → client events: message, reaction_added, typing, presence_change\n     client → server: ping, typing, mark_read"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Entity",
+      "Key",
+      "Notes"
+     ],
+     "rows": [
+      [
+       "messages",
+       "(channel_id, ts)",
+       "ts = time-ordered unique ID; sharded by channel_id"
+      ],
+      [
+       "channels",
+       "channel_id",
+       "workspace_id, type, name"
+      ],
+      [
+       "memberships",
+       "(channel_id, user_id) + (user_id, channel_id)",
+       "Both directions for lookups"
+      ],
+      [
+       "read_state",
+       "(user_id, channel_id)",
+       "last_read_ts → unread counts"
+      ],
+      [
+       "threads",
+       "(channel_id, thread_ts, ts)",
+       "Replies stored like messages with parent ts"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Sharding messages by `channel_id` keeps one channel's history on one shard, so `history` is a single range scan. Workspace-level sharding was Slack's original model; very large workspaces forced moving to finer-grained (channel) sharding."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Clients",
+        "kind": "client",
+        "sub": "desktop / mobile"
+       }
+      ],
+      [
+       {
+        "label": "Edge LB",
+        "kind": "edge"
+       },
+       {
+        "label": "Gateway servers",
+        "kind": "service",
+        "sub": "hold WebSockets"
+       }
+      ],
+      [
+       {
+        "label": "Message API",
+        "kind": "service",
+        "sub": "validate, persist"
+       },
+       {
+        "label": "Channel servers",
+        "kind": "service",
+        "sub": "consistent-hashed by channel"
+       }
+      ],
+      [
+       {
+        "label": "MySQL / Vitess",
+        "kind": "db",
+        "sub": "sharded by channel"
+       },
+       {
+        "label": "Kafka",
+        "kind": "queue",
+        "sub": "jobs, search, push"
+       }
+      ],
+      [
+       {
+        "label": "Search index",
+        "kind": "store"
+       },
+       {
+        "label": "Push service",
+        "kind": "ext",
+        "sub": "APNs / FCM"
+       }
+      ]
+     ],
+     "caption": "Write via API, fan-out via channel servers to the gateways holding recipients"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Client POSTs the message with a `clientMsgId` (idempotency).",
+      "Message API writes to the channel's shard and gets the `ts`.",
+      "It hands the message to the channel server that owns the channel (consistent hashing).",
+      "The channel server knows which gateways have subscribers for this channel and pushes to each.",
+      "Gateways write the event down each member's socket; offline members get mobile push via Kafka workers."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "fanout",
+   "title": "Deep dive: fan-out and subscriptions",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "When a client connects, its gateway subscribes to the channel servers for all of that user's channels.",
+      "Channel server keeps `channel → set of gateways` (not users), so one message to a 10k-member channel becomes ~a few hundred gateway sends, and gateways fan out locally.",
+      "Large channels: rate-limit announcements, batch reactions, and send lightweight 'new message' hints to clients that then fetch."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key idea",
+     "text": "Fan out to gateways, not users. It turns O(members) network hops into O(gateways), and each gateway loops locally over its sockets."
+    }
+   ]
+  },
+  {
+   "id": "ordering",
+   "title": "Deep dive: ordering, delivery and reconnects",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Order within a channel comes from the single writer: the shard assigns a monotonically increasing `ts`.",
+      "Clients render optimistically with `clientMsgId` and reconcile when the server echoes the event.",
+      "On reconnect, the client sends its last seen `ts` per channel and fetches the gap via history API, so missed WebSocket events are never lost.",
+      "At-least-once to the socket; clients dedupe by `ts`."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Don't rely on the WebSocket as the source of truth. It's a notification pipe; history in the DB is the truth."
+    }
+   ]
+  },
+  {
+   "id": "presence",
+   "title": "Deep dive: presence and typing",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Presence is derived from connection state and heartbeats; stored in an in-memory store with TTL.",
+      "Only push presence for users visible to a client (DM list, open channel), not the whole workspace: a 100k workspace can't broadcast every status change.",
+      "Typing indicators are ephemeral pub/sub, never persisted, and dropped under load."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Gateway crash",
+       "50k users disconnect",
+       "Clients reconnect with jittered backoff to another gateway, fetch gaps"
+      ],
+      [
+       "Reconnect storm after outage",
+       "Thundering herd on auth + history",
+       "Jitter, connection admission control, cached boot payload"
+      ],
+      [
+       "Hot channel (#general 100k)",
+       "Channel server overloaded",
+       "Dedicated channel server, coalesce updates, read-only announcement mode"
+      ],
+      [
+       "DB shard down",
+       "Channels on it can't post",
+       "Vitess primary failover; queue writes briefly"
+      ],
+      [
+       "Search lag",
+       "New messages not searchable",
+       "Acceptable seconds; index async from Kafka"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Shard key",
+       "channel_id",
+       "Cross-channel queries need scatter-gather"
+      ],
+      [
+       "Store",
+       "MySQL + Vitess",
+       "Simpler horizontal store vs familiar relational tooling"
+      ],
+      [
+       "Delivery",
+       "Push to gateways + gap fetch",
+       "Exactly-once over the socket"
+      ],
+      [
+       "Presence",
+       "Scoped to visible users",
+       "Global real-time presence"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Channels, DMs, history, threads, presence, search."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "< 500 ms delivery, no loss, per-channel order."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "20M connections, 70k msgs/s peak, 1M deliveries/s."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "postMessage, history, WS events; messages keyed (channel_id, ts)."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Gateways + channel servers + sharded DB + Kafka side effects."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Fan-out via gateways, ordering + reconnect, presence scoping."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Reconnect storms, hot channels, delivery latency metrics."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How are unread counts computed?",
+       "a": "Store `last_read_ts` per user-channel; unread = messages with ts > last_read_ts, counted lazily and cached; badges update via events."
+      },
+      {
+       "q": "How do you support search?",
+       "a": "Index messages from Kafka into Elasticsearch partitioned by workspace; enforce channel membership filters at query time."
+      },
+      {
+       "q": "Enterprise data residency?",
+       "a": "Pin a workspace's shards to a region; gateways in other regions proxy to it."
+      },
+      {
+       "q": "Message edits and deletes?",
+       "a": "Write an edit event with the same ts; fan out like a message; history returns the latest version."
+      },
+      {
+       "q": "Why not Kafka for the real-time path?",
+       "a": "Kafka adds latency and isn't built for per-user socket routing; it's used for async side effects (push, search, analytics)."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Gateways hold sockets; channel servers fan out.",
+      "Fan out to gateways, not users.",
+      "Shard messages by channel_id; ts gives order.",
+      "clientMsgId makes sends idempotent.",
+      "Reconnect → fetch gap by last ts.",
+      "Presence only for visible users.",
+      "Kafka for push, search, analytics."
+     ]
+    }
+   ]
+  }
+ ]
+}

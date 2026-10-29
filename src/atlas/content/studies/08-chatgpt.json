@@ -1,0 +1,474 @@
+{
+ "id": "chatgpt",
+ "num": 8,
+ "title": "ChatGPT",
+ "summary": "An LLM chat service: queue and batch requests onto GPU replicas, stream tokens back over SSE, and manage the KV cache, rate limits and conversation storage around a scarce, expensive accelerator fleet.",
+ "tags": [
+  "GPU serving",
+  "Streaming",
+  "Batching",
+  "Rate limits"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "apis-realtime",
+  "rate-limiting",
+  "queues-kafka",
+  "caching",
+  "resilience"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Users chat in conversations; responses stream token by token"
+      ],
+      [
+       "Functional",
+       "Conversation history, regenerate, stop generation; file/image inputs"
+      ],
+      [
+       "Functional",
+       "Plans with different models and usage limits"
+      ],
+      [
+       "Non-functional",
+       "Time to first token < 1 s p50; steady ~30–80 tokens/s per stream"
+      ],
+      [
+       "Non-functional",
+       "Maximize GPU utilization (the dominant cost)"
+      ],
+      [
+       "Non-functional",
+       "Graceful degradation under demand spikes"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Details of any specific provider's internals aren't public; this follows public LLM-serving practice (vLLM, continuous batching, PagedAttention)."
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Requests / s",
+       "value": "~50k",
+       "sub": "peak"
+      },
+      {
+       "label": "Output tokens",
+       "value": "~500",
+       "sub": "avg per reply"
+      },
+      {
+       "label": "Token throughput",
+       "value": "25M tok/s",
+       "sub": "fleet-wide"
+      },
+      {
+       "label": "Per GPU replica",
+       "value": "~2–5k tok/s",
+       "sub": "batched → thousands of replicas"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Compute is the bottleneck, not the web tier. Every design choice should raise tokens per GPU per second: batching, KV cache reuse, and routing short requests to smaller models."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/conversations/{id}/messages   { content, model, parentMessageId }\n  -> 200 text/event-stream\n     data: {\"delta\":\"Hel\"}\n     data: {\"delta\":\"lo\"}\n     data: {\"done\":true, \"usage\":{\"in\":812,\"out\":214}}\nPOST /v1/conversations/{id}/stop\nGET  /v1/conversations?cursor   /   GET /v1/conversations/{id}"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Data",
+      "Key",
+      "Store"
+     ],
+     "rows": [
+      [
+       "conversations",
+       "(user_id, conversation_id)",
+       "Sharded SQL / document DB"
+      ],
+      [
+       "messages",
+       "(conversation_id, message_id)",
+       "Same store; tree via parent_id (regenerations branch)"
+      ],
+      [
+       "usage",
+       "(user_id, window)",
+       "Redis counters + durable ledger for billing"
+      ],
+      [
+       "files",
+       "file_id",
+       "Object storage + extracted text / embeddings"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Client",
+        "kind": "client",
+        "sub": "SSE"
+       }
+      ],
+      [
+       {
+        "label": "API gateway",
+        "kind": "edge",
+        "sub": "auth, rate limit"
+       },
+       {
+        "label": "Chat service",
+        "kind": "service",
+        "sub": "build prompt, persist"
+       }
+      ],
+      [
+       {
+        "label": "Safety filters",
+        "kind": "service"
+       },
+       {
+        "label": "Router / scheduler",
+        "kind": "service",
+        "sub": "model, region, queue"
+       }
+      ],
+      [
+       {
+        "label": "Inference replica",
+        "kind": "service",
+        "sub": "GPUs, continuous batching"
+       },
+       {
+        "label": "Inference replica",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Conversation DB",
+        "kind": "db"
+       },
+       {
+        "label": "Usage store",
+        "kind": "cache"
+       }
+      ]
+     ],
+     "caption": "Web tier is cheap; the scheduler and GPU fleet are the system"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Gateway checks auth and plan limits (tokens per minute, messages per window).",
+      "Chat service loads history, truncates/summarizes to fit the context window, applies system prompt.",
+      "Router picks model + replica pool (by load, region, prefix-cache affinity) and enqueues.",
+      "Replica runs prefill (process the prompt) then decode (one token per step), streaming tokens back through the chat service as SSE.",
+      "On completion, persist the message and usage; side effects (titles, moderation logs) async."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "batching",
+   "title": "Deep dive: batching and the KV cache",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Decode is memory-bandwidth bound: one token per sequence per step. Batching many sequences per step multiplies throughput almost for free.",
+      "**Continuous batching:** sequences join and leave the batch every step, so a long reply doesn't hold short ones hostage.",
+      "**KV cache:** attention keys/values for past tokens are kept in GPU memory; it's often the limit on batch size.",
+      "**PagedAttention:** store KV cache in fixed-size blocks like virtual memory pages, cutting fragmentation and enabling sharing.",
+      "**Prefix caching:** reuse KV for shared prefixes (system prompt, earlier turns) — route a conversation back to the replica that holds its prefix.",
+      "Prefill and decode can be split onto different pools (disaggregated serving) since they stress GPUs differently."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key idea",
+     "text": "Throughput comes from batch size; batch size is limited by KV-cache memory; so KV-cache management is the heart of LLM serving."
+    }
+   ]
+  },
+  {
+   "id": "streaming",
+   "title": "Deep dive: streaming and cancellation",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Server-Sent Events",
+       "pros": [
+        "Plain HTTP, works through proxies",
+        "Auto-reconnect",
+        "One-way fits token streaming"
+       ],
+       "cons": [
+        "Text only, one direction"
+       ]
+      },
+      {
+       "title": "WebSocket",
+       "pros": [
+        "Bidirectional (voice, interrupts)"
+       ],
+       "cons": [
+        "Stateful infra, sticky routing"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Stop button → cancel request propagates to the replica so the sequence leaves the batch immediately (saves GPU).",
+      "If the client disconnects, keep generating briefly and persist, so a refresh shows the full answer.",
+      "Backpressure: buffer tokens per stream; slow clients don't block the GPU step."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "capacity",
+   "title": "Deep dive: limits and overload",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Rate limits in tokens, not just requests: a token bucket per user per model, plus org-level quotas.",
+      "Admission control: when queues exceed a target wait, shed free-tier traffic first, fall back to a smaller model, or show a 'busy' message.",
+      "Priority queues per plan; deadlines so queued requests that would exceed timeout are dropped early.",
+      "Autoscaling is slow (GPU nodes, model load minutes) — keep warm headroom and shift traffic across regions."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Retries during overload multiply load on the scarcest resource. Use retry budgets and return 429 with Retry-After."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "GPU node fails mid-stream",
+       "Stream breaks",
+       "Client resumes / regenerates; persist partial output"
+      ],
+      [
+       "Demand spike (launch)",
+       "Long queues",
+       "Admission control, tiered priority, smaller-model fallback"
+      ],
+      [
+       "Long-context requests",
+       "Eat KV memory, starve batch",
+       "Separate pools by context length, chunked prefill"
+      ],
+      [
+       "Model rollout bug",
+       "Bad outputs everywhere",
+       "Canary per region, eval gates, instant rollback"
+      ],
+      [
+       "Conversation DB slow",
+       "First token delayed",
+       "Cache recent conversation context; write async"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Batching",
+       "Continuous, large batches",
+       "Slight per-token latency"
+      ],
+      [
+       "Transport",
+       "SSE",
+       "Bidirectional channel"
+      ],
+      [
+       "Routing",
+       "Prefix-cache affinity",
+       "Perfectly even load"
+      ],
+      [
+       "Overload",
+       "Shed / downgrade",
+       "Serving everyone at full quality"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Chat, stream, history, plans."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "TTFT < 1 s, GPU utilization."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "25M tokens/s → thousands of GPU replicas."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "SSE endpoint; message tree."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Gateway → chat svc → router → inference replicas."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Continuous batching + KV cache, streaming + cancel, overload."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Metrics: TTFT, tokens/s, queue wait, GPU util, cost per 1k tokens."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you handle a conversation longer than the context window?",
+       "a": "Truncate oldest turns, summarize earlier history, or retrieve relevant past turns via embeddings."
+      },
+      {
+       "q": "How would you add tool use / browsing?",
+       "a": "Model emits a tool call; orchestrator runs it (sandboxed), appends the result, resumes decoding."
+      },
+      {
+       "q": "How do you bill accurately?",
+       "a": "Count input/output tokens at the replica, emit usage events to Kafka, aggregate idempotently into a ledger."
+      },
+      {
+       "q": "How do you cut cost?",
+       "a": "Quantization, speculative decoding, smaller models for easy prompts, prefix caching, higher batch sizes."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "GPU time is the cost; maximize tokens/GPU/s.",
+      "Prefill then decode; decode is memory-bandwidth bound.",
+      "Continuous batching + PagedAttention KV cache.",
+      "Prefix-cache affinity routing.",
+      "SSE for token streams; cancel frees GPU.",
+      "Rate limit in tokens; shed and downgrade under load."
+     ]
+    }
+   ]
+  }
+ ]
+}

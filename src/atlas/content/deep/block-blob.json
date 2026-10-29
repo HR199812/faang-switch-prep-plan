@@ -1,0 +1,234 @@
+{
+ "minutes": 14,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Why big files don't belong in your database or app servers",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Images, videos, documents and backups are large, immutable blobs. Storing them in a relational database bloats backups and the buffer pool; streaming them through app servers wastes CPU, memory and bandwidth. Object storage (S3, GCS, Azure Blob) is built for this: effectively unlimited capacity, 11 nines of durability, HTTP access, cheap tiers — and it pairs naturally with a CDN."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Store",
+      "What goes there"
+     ],
+     "rows": [
+      [
+       "Object storage",
+       "The bytes"
+      ],
+      [
+       "Database",
+       "Metadata: owner, key, size, content type, status, dimensions"
+      ],
+      [
+       "CDN",
+       "Cached copies served close to users"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "upload",
+   "title": "Direct uploads with presigned URLs",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Client",
+      "API",
+      "Object store",
+      "Processing"
+     ],
+     "steps": [
+      {
+       "from": "Client",
+       "to": "API",
+       "label": "POST /uploads {name, size, type}"
+      },
+      {
+       "from": "API",
+       "to": "API",
+       "label": "auth, validate, create row (PENDING)"
+      },
+      {
+       "from": "API",
+       "to": "Client",
+       "label": "presigned PUT URL (expires 15 min)",
+       "dashed": true
+      },
+      {
+       "from": "Client",
+       "to": "Object store",
+       "label": "PUT bytes",
+       "note": "direct, resumable / multipart"
+      },
+      {
+       "from": "Object store",
+       "to": "Processing",
+       "label": "ObjectCreated event"
+      },
+      {
+       "from": "Processing",
+       "to": "API",
+       "label": "mark READY + variants"
+      }
+     ],
+     "caption": "The app server never touches the bytes"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Presigned URLs embed a signature for one operation on one key with an expiry — no credentials on the client.",
+      "Large files use **multipart upload**: parts of 5–100 MB uploaded in parallel and retried independently, then completed.",
+      "Validate after upload (type sniffing, virus scan, size) before marking the object usable."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "processing",
+   "title": "Media processing pipeline",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Object store (originals)",
+        "kind": "store"
+       }
+      ],
+      [
+       {
+        "label": "Event / queue",
+        "kind": "queue"
+       }
+      ],
+      [
+       {
+        "label": "Workers",
+        "kind": "service",
+        "sub": "thumbnails, transcoding, EXIF strip"
+       }
+      ],
+      [
+       {
+        "label": "Object store (variants)",
+        "kind": "store"
+       },
+       {
+        "label": "Metadata DB",
+        "kind": "db"
+       }
+      ],
+      [
+       {
+        "label": "CDN",
+        "kind": "edge"
+       }
+      ]
+     ],
+     "caption": "Event-driven processing"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Images: generate fixed sizes on upload, or resize on the fly at the edge with caching.",
+      "Video: transcode into multiple bitrates and segment into HLS/DASH chunks for adaptive streaming.",
+      "Idempotent workers keyed by object key + variant, because events can be delivered twice."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "download",
+   "title": "Serving downloads",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Public assets: CDN in front of the bucket, long TTLs, content-hashed keys.",
+      "Private assets: short-lived signed URLs or signed cookies (CloudFront), checked at the edge.",
+      "Range requests for video seeking and resumable downloads.",
+      "Never make the bucket itself public unless every object is meant to be."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "durability",
+   "title": "How object stores stay durable",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Replication (3 copies)",
+       "pros": [
+        "Simple, fast reads and repairs"
+       ],
+       "cons": [
+        "3× storage cost"
+       ]
+      },
+      {
+       "title": "Erasure coding (e.g. 6 data + 3 parity)",
+       "pros": [
+        "Survives losing any 3 of 9 fragments at ~1.5× storage"
+       ],
+       "cons": [
+        "CPU to encode/decode; reads touch several nodes"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Large systems typically erasure-code across availability zones, keep metadata in a strongly consistent, sharded index, and continuously scrub data to detect and repair bit rot."
+    }
+   ]
+  },
+  {
+   "id": "costs",
+   "title": "Lifecycle and cost",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Tier",
+      "Use",
+      "Trade-off"
+     ],
+     "rows": [
+      [
+       "Standard",
+       "Hot data",
+       "Highest storage cost, cheapest access"
+      ],
+      [
+       "Infrequent access",
+       "Older media",
+       "Retrieval fee"
+      ],
+      [
+       "Archive (Glacier)",
+       "Backups, compliance",
+       "Minutes–hours to restore"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Clients upload directly to object storage with presigned multipart URLs; an upload event triggers idempotent workers that create variants; metadata lives in the DB; everything is served through a CDN with signed URLs for private content."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,434 @@
+{
+ "id": "youtube",
+ "num": 15,
+ "title": "YouTube",
+ "summary": "Video at planet scale: resumable uploads into object storage, a parallel transcoding DAG that produces many bitrates and segments, CDN delivery with adaptive bitrate streaming, and approximate-then-exact view counting.",
+ "tags": [
+  "Transcoding",
+  "CDN",
+  "Adaptive bitrate",
+  "View counts"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "blob",
+  "cdn",
+  "queues-kafka",
+  "databases",
+  "caching"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Upload videos (up to hours long); watch on any device; search; comments; likes; view counts"
+      ],
+      [
+       "Functional",
+       "Recommendations on home and watch-next"
+      ],
+      [
+       "Non-functional",
+       "Playback start < 2 s; minimal rebuffering"
+      ],
+      [
+       "Non-functional",
+       "Uploads processed in minutes; never lose an upload"
+      ],
+      [
+       "Non-functional",
+       "Billions of views/day; 500+ hours uploaded per minute"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Upload",
+       "value": "500 h/min",
+       "sub": "≈ 30k h/hour of video"
+      },
+      {
+       "label": "Stored per hour of video",
+       "value": "~10–20 GB",
+       "sub": "all renditions"
+      },
+      {
+       "label": "New storage / day",
+       "value": "~10 PB",
+       "sub": "before replication"
+      },
+      {
+       "label": "Watch egress",
+       "value": "tens of Tbps",
+       "sub": "served by edge caches"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Storage and egress dominate. Transcoding is the compute-heavy batch job, and delivery is a CDN problem with adaptive bitrate on the client."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/uploads                 { title, size, mime }     -> { uploadId, resumableUrl }\nPUT  {resumableUrl}  Content-Range: bytes 0-8388607/…   (chunked, resumable)\nGET  /v1/videos/{id}              -> metadata + manifest URL\nGET  {cdn}/{id}/manifest.mpd      -> DASH / HLS manifest\nGET  {cdn}/{id}/720p/seg_00042.m4s\nPOST /v1/videos/{id}/views         (beacon)"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Data",
+      "Key",
+      "Store"
+     ],
+     "rows": [
+      [
+       "Video metadata",
+       "video_id",
+       "Sharded MySQL via Vitess (YouTube built Vitess)"
+      ],
+      [
+       "Raw upload + renditions",
+       "video_id / rendition / segment",
+       "Object storage (GCS / Colossus)"
+      ],
+      [
+       "View counts",
+       "video_id",
+       "Sharded counters + async aggregation"
+      ],
+      [
+       "Comments",
+       "(video_id, comment_id)",
+       "Wide-column / sharded store"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Creator",
+        "kind": "client"
+       },
+       {
+        "label": "Viewer",
+        "kind": "client",
+        "sub": "ABR player"
+       }
+      ],
+      [
+       {
+        "label": "Upload service",
+        "kind": "service",
+        "sub": "resumable"
+       },
+       {
+        "label": "CDN / edge caches",
+        "kind": "edge"
+       }
+      ],
+      [
+       {
+        "label": "Raw object store",
+        "kind": "store"
+       },
+       {
+        "label": "Transcode queue",
+        "kind": "queue"
+       }
+      ],
+      [
+       {
+        "label": "Transcode workers",
+        "kind": "service",
+        "sub": "split → encode → merge"
+       },
+       {
+        "label": "Video metadata (Vitess)",
+        "kind": "db"
+       }
+      ],
+      [
+       {
+        "label": "Renditions store",
+        "kind": "store",
+        "sub": "segments + manifests"
+       }
+      ]
+     ],
+     "caption": "Upload once, transcode in parallel, serve from the edge"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Client uploads in resumable chunks to object storage; upload service records progress.",
+      "On completion, an event enqueues a processing DAG: validate → split into GOP-aligned chunks → encode each chunk × each rendition in parallel → package into HLS/DASH segments → thumbnails, captions, content ID checks.",
+      "Metadata flips to PUBLISHED when the minimum renditions exist (low bitrates first, 4K later).",
+      "Viewer fetches manifest, then segments from the nearest edge, switching bitrate per segment."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "transcoding",
+   "title": "Deep dive: the transcoding pipeline",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Split long videos into chunks (~a few seconds, GOP-aligned) so thousands of workers encode one video in parallel.",
+      "Renditions ladder: 144p … 4K, codecs H.264 / VP9 / AV1; popular videos get extra-efficient encodes later (AV1 costs more CPU, saves bandwidth).",
+      "DAG orchestration with retries per task; idempotent tasks keyed by (video, chunk, rendition).",
+      "Priority: fast low-quality renditions first so the video is watchable quickly."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key idea",
+     "text": "Parallelize across chunks and renditions, publish the cheap renditions first, and re-encode the popular head with better codecs later."
+    }
+   ]
+  },
+  {
+   "id": "delivery",
+   "title": "Deep dive: delivery and adaptive bitrate",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "HLS/DASH: manifest lists renditions; video is 2–6 s segments; the player picks the next segment's bitrate from measured throughput and buffer level.",
+      "Edge caches inside ISPs (Google Global Cache) serve the popular head; the long tail comes from regional caches or origin.",
+      "Prefetch the first segments of likely next videos (watch-next).",
+      "Signed URLs and per-region rights enforcement at the edge."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Players buffer a few segments and choose bitrate per segment; that, plus ISP-level caches, is how start time stays under two seconds."
+    }
+   ]
+  },
+  {
+   "id": "views",
+   "title": "Deep dive: counting views",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Billions of increments a day on hot keys: never `UPDATE videos SET views = views + 1`.",
+      "Clients send view beacons → Kafka → stream aggregation per video per minute → sharded counters; displayed count is cached and lags slightly.",
+      "Fraud filtering: dedupe by user/session, bot detection before counts are final (why counts sometimes freeze).",
+      "For a single viral key, use sharded sub-counters (`views:{id}:{0..63}`) summed on read."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Upload interrupted",
+       "Creator restarts",
+       "Resumable chunked uploads with offsets"
+      ],
+      [
+       "Transcode worker dies",
+       "Task stuck",
+       "Task leases + retries; idempotent outputs"
+      ],
+      [
+       "Viral video",
+       "Edge + counter hot spot",
+       "CDN tiers, sharded counters"
+      ],
+      [
+       "Region outage",
+       "Playback errors",
+       "Multi-region storage, CDN failover, client retries other edges"
+      ],
+      [
+       "Copyright violation",
+       "Legal risk",
+       "Content ID fingerprint matching in the pipeline"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Publishing",
+       "Low renditions first",
+       "All qualities at launch"
+      ],
+      [
+       "Codecs",
+       "AV1 for popular videos",
+       "CPU cost"
+      ],
+      [
+       "Counts",
+       "Async aggregation",
+       "Exact real-time numbers"
+      ],
+      [
+       "Metadata",
+       "Sharded MySQL (Vitess)",
+       "Schema flexibility"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Upload, watch, counts, recs."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Start < 2 s, never lose uploads."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "500 h/min upload, ~10 PB/day storage."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "Resumable upload, manifests, segments."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Upload → object store → transcode DAG → renditions → CDN."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Chunked parallel transcode, ABR delivery, view counting."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Rebuffer rate, time-to-publish, egress cost."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you support live streaming?",
+       "a": "Ingest RTMP/SRT, transcode in real time into short segments (low-latency HLS/DASH), publish manifests every segment."
+      },
+      {
+       "q": "How are recommendations served?",
+       "a": "Candidate generation (embeddings, watch history) → ranking model → re-ranking for diversity, cached per user session."
+      },
+      {
+       "q": "How do you reduce storage cost?",
+       "a": "Tier cold videos to cheaper storage, drop rarely used renditions and regenerate on demand."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Resumable chunked uploads to object storage.",
+      "Transcode DAG: split → encode chunks × renditions in parallel → package.",
+      "Publish low bitrates first.",
+      "HLS/DASH segments + ABR player.",
+      "ISP edge caches for the head, origin for the tail.",
+      "Views: beacons → Kafka → aggregate → sharded counters."
+     ]
+    }
+   ]
+  }
+ ]
+}

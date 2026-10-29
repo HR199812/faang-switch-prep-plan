@@ -1,0 +1,352 @@
+{
+ "id": "distributed-kv-store",
+ "num": 34,
+ "title": "Distributed Key-Value Store (Dynamo)",
+ "summary": "A highly available, partitioned KV store: consistent hashing with virtual nodes, N-way replication with tunable quorums, vector clocks or LWW for conflicts, hinted handoff, Merkle-tree anti-entropy and gossip membership.",
+ "tags": [
+  "Consistent hashing",
+  "Quorums",
+  "Gossip",
+  "LSM"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "sharding",
+  "quorums-gossip",
+  "storage-engines",
+  "replication",
+  "consistency"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "put(key, value), get(key); values up to ~1 MB"
+      ],
+      [
+       "Non-functional",
+       "Always writable (AP): accept writes during partitions"
+      ],
+      [
+       "Non-functional",
+       "Tunable consistency per request"
+      ],
+      [
+       "Non-functional",
+       "Linear horizontal scale; no single point of failure"
+      ],
+      [
+       "Non-functional",
+       "p99 latency in single-digit ms"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Data",
+       "value": "~100 TB"
+      },
+      {
+       "label": "Replication",
+       "value": "N = 3",
+       "sub": "300 TB stored"
+      },
+      {
+       "label": "Node size",
+       "value": "~2 TB",
+       "sub": "≈150 nodes"
+      },
+      {
+       "label": "QPS",
+       "value": "~1M",
+       "sub": "mixed"
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Ask for the read/write ratio and value size — they decide the storage engine and cache sizing."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Client / smart client",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Coordinator (any node)",
+        "kind": "service",
+        "sub": "routes by hash ring"
+       }
+      ],
+      [
+       {
+        "label": "Replica 1",
+        "kind": "store"
+       },
+       {
+        "label": "Replica 2",
+        "kind": "store"
+       },
+       {
+        "label": "Replica 3",
+        "kind": "store"
+       }
+      ],
+      [
+       {
+        "label": "Gossip membership",
+        "kind": "service"
+       },
+       {
+        "label": "Anti-entropy (Merkle)",
+        "kind": "service"
+       }
+      ]
+     ],
+     "caption": "Leaderless, every node is equal"
+    }
+   ]
+  },
+  {
+   "id": "deep-partition",
+   "title": "Deep dive: partitioning and replication",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Consistent hashing: hash(key) onto a ring; each physical node owns many **virtual nodes** so load and rebalancing spread evenly.",
+      "The key's **preference list** is the next N distinct physical nodes clockwise (spread across racks/AZs).",
+      "Adding a node moves only ~1/N of keys."
+     ]
+    },
+    {
+     "t": "ring"
+    }
+   ]
+  },
+  {
+   "id": "deep-quorum",
+   "title": "Deep dive: quorums and conflicts",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Setting",
+      "Meaning",
+      "Trade-off"
+     ],
+     "rows": [
+      [
+       "W + R > N",
+       "Read and write sets overlap",
+       "Reads see the latest acked write (absent sloppy quorum)"
+      ],
+      [
+       "W = 1",
+       "Ack after one replica",
+       "Fast, available writes; weaker durability"
+      ],
+      [
+       "R = 1",
+       "Read one replica",
+       "Fast reads; may be stale"
+      ],
+      [
+       "N=3, W=2, R=2",
+       "Common default",
+       "Tolerates one slow/failed replica"
+      ]
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Conflicts from concurrent writes: **vector clocks** detect them and return siblings for the client to merge (Dynamo, Riak); or **last-write-wins** by timestamp (Cassandra) — simple but loses writes.",
+      "**Read repair:** on a read, replicas with stale versions are updated in the background."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "deep-failure",
+   "title": "Deep dive: failure handling",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Detect",
+       "text": "Gossip: nodes exchange heartbeats/membership with random peers every second; phi-accrual detectors suspect failures."
+      },
+      {
+       "title": "Sloppy quorum",
+       "text": "If a replica is down, write to the next healthy node with a hint."
+      },
+      {
+       "title": "Hinted handoff",
+       "text": "When the owner recovers, the hint holder forwards the writes."
+      },
+      {
+       "title": "Anti-entropy",
+       "text": "Replicas compare Merkle trees of key ranges and sync only differing subtrees."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "deep-storage",
+   "title": "Deep dive: storage engine",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Each node uses an LSM tree: writes go to a commit log + memtable, flush to immutable SSTables, compaction merges them.",
+      "Bloom filters per SSTable skip files that can't contain the key.",
+      "Deletes are tombstones that must outlive the longest replica outage (gc_grace) or deleted data resurrects."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Leaderless (Dynamo/Cassandra)",
+       "pros": [
+        "Always writable; no failover"
+       ],
+       "cons": [
+        "Conflicts; eventual consistency by default"
+       ]
+      },
+      {
+       "title": "Leader-based (Raft per shard, e.g. TiKV)",
+       "pros": [
+        "Linearizable reads/writes"
+       ],
+       "cons": [
+        "Unavailable for a shard during leader election / minority partition"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd use consistent hashing with vnodes, N=3 with tunable R/W, sloppy quorum plus hinted handoff for availability, and Merkle trees to converge."
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "API, consistency needs (CP vs AP), value size."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Nodes needed."
+      },
+      {
+       "min": "10–20",
+       "title": "HLD",
+       "text": "Ring, coordinator, replicas."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "Quorums, conflicts, failure handling."
+      },
+      {
+       "min": "35–45",
+       "title": "Storage",
+       "text": "LSM, tombstones, compaction."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "Does W + R > N give linearizability?",
+       "a": "No — with sloppy quorums, clock-based LWW or concurrent writes it doesn't; it gives overlap of acked sets in the happy path."
+      },
+      {
+       "q": "How do you add a node?",
+       "a": "It takes vnodes from others; data streams over for those ranges; gossip spreads the new ring."
+      },
+      {
+       "q": "How do you handle a hot key?",
+       "a": "Cache in front, replicate the key more widely, or split it into sub-keys at the application layer."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Ring + vnodes; preference list of N.",
+      "Tunable W/R; W+R>N for overlap.",
+      "Vector clocks or LWW.",
+      "Gossip + sloppy quorum + hinted handoff + Merkle anti-entropy.",
+      "LSM + Bloom filters + tombstones."
+     ]
+    }
+   ]
+  }
+ ]
+}

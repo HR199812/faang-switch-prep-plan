@@ -1,0 +1,213 @@
+{
+ "minutes": 13,
+ "sections": [
+  {
+   "id": "what",
+   "title": "What Redis is (and isn't)",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Redis is an in-memory data-structure server. It's single-threaded for command execution (I/O threads exist in newer versions), which makes every command atomic and makes it very fast — ~100k+ simple ops per second per core with sub-millisecond latency. It's commonly used as a cache, but its data structures make it a toolkit for rate limiters, leaderboards, queues, locks, sessions and pub/sub."
+    },
+    {
+     "t": "p",
+     "text": "It isn't a durable primary database by default: data lives in RAM, persistence is optional and asynchronous, and replication is asynchronous, so acknowledged writes can be lost on failover."
+    }
+   ]
+  },
+  {
+   "id": "structures",
+   "title": "Data structures and what they're for",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Commands",
+      "Use it for"
+     ],
+     "rows": [
+      [
+       "String",
+       "GET, SET, INCR, SETNX, EXPIRE",
+       "Cache entries, counters, simple locks"
+      ],
+      [
+       "Hash",
+       "HSET, HGET, HINCRBY",
+       "Objects (user profile fields), token buckets"
+      ],
+      [
+       "List",
+       "LPUSH, RPOP, BRPOP, LRANGE",
+       "Simple queues, recent-items lists"
+      ],
+      [
+       "Set",
+       "SADD, SISMEMBER, SINTER",
+       "Unique members, tags, mutual friends"
+      ],
+      [
+       "Sorted set",
+       "ZADD, ZRANGE, ZRANK, ZRANGEBYSCORE",
+       "Leaderboards, time-ordered feeds, sliding-window rate limits, delay queues"
+      ],
+      [
+       "Stream",
+       "XADD, XREADGROUP, XACK",
+       "Durable-ish event log with consumer groups"
+      ],
+      [
+       "HyperLogLog",
+       "PFADD, PFCOUNT",
+       "Approximate unique counts (12 KB each)"
+      ],
+      [
+       "Geo",
+       "GEOADD, GEOSEARCH",
+       "Nearby search on a sorted set of geohashes"
+      ],
+      [
+       "Pub/Sub",
+       "PUBLISH, SUBSCRIBE",
+       "Fire-and-forget fan-out (no persistence)"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "leaderboard",
+   "title": "Example: a real-time leaderboard",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "redis",
+     "text": "ZINCRBY game:42:scores 50 \"player:alice\"     # add points\nZREVRANGE game:42:scores 0 9 WITHSCORES       # top 10\nZREVRANK game:42:scores \"player:alice\"        # alice's rank (0-based)\nZREVRANGE game:42:scores 95 105               # players around rank 100"
+    },
+    {
+     "t": "p",
+     "text": "Sorted sets are skip lists plus a hash map, so updates and rank queries are O(log n). A leaderboard with 10M players fits in a few GB and answers rank queries in microseconds."
+    }
+   ]
+  },
+  {
+   "id": "lock",
+   "title": "Example: a lock — and its limits",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "redis",
+     "text": "SET lock:order:123 <random-token> NX PX 30000   # acquire if absent, 30 s TTL\n# ... do work ...\n# release only if we still own it (Lua for atomicity):\nif redis.call(\"GET\", KEYS[1]) == ARGV[1] then return redis.call(\"DEL\", KEYS[1]) end"
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Treating a Redis lock as a correctness guarantee. A GC pause or network delay can outlast the TTL, so two clients may both think they hold it. For correctness, the protected resource must check a fencing token (monotonic number) — or use a consensus-backed lock (etcd, ZooKeeper)."
+    }
+   ]
+  },
+  {
+   "id": "persistence",
+   "title": "Persistence and replication",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "RDB snapshots",
+       "pros": [
+        "Compact, fast restarts"
+       ],
+       "cons": [
+        "Lose everything since the last snapshot"
+       ]
+      },
+      {
+       "title": "AOF (append-only file)",
+       "pros": [
+        "fsync every second → lose ≤ ~1 s",
+        "Replayable"
+       ],
+       "cons": [
+        "Larger files; rewrite needed"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Replication is asynchronous: primary → replicas. **Sentinel** monitors and fails over a primary/replica set.",
+      "**Redis Cluster** shards keys into 16,384 hash slots across primaries, each with replicas. Multi-key commands must hit one slot — use hash tags: `{user:42}:cart` and `{user:42}:profile` land together.",
+      "`WAIT n` can make a write wait for n replicas, narrowing (not eliminating) the loss window."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cluster",
+   "title": "How Redis Cluster routes a command",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Client",
+      "Node A (slots 0–5460)",
+      "Node B (slots 5461–10922)"
+     ],
+     "steps": [
+      {
+       "from": "Client",
+       "to": "Node A (slots 0–5460)",
+       "label": "GET {user:42}:cart",
+       "note": "client's slot map says A"
+      },
+      {
+       "from": "Node A (slots 0–5460)",
+       "to": "Client",
+       "label": "MOVED 7638 node B",
+       "note": "slot moved during resharding",
+       "dashed": true
+      },
+      {
+       "from": "Client",
+       "to": "Node B (slots 5461–10922)",
+       "label": "GET {user:42}:cart",
+       "note": "client updates its slot map"
+      },
+      {
+       "from": "Node B (slots 5461–10922)",
+       "to": "Client",
+       "label": "value",
+       "dashed": true
+      }
+     ],
+     "caption": "Client-side slot routing with redirects"
+    }
+   ]
+  },
+  {
+   "id": "pitfalls",
+   "title": "Operational pitfalls",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Big keys** (a 10M-element set) block the single thread on delete or scan — use UNLINK and keep collections bounded.",
+      "**Hot keys** concentrate load on one shard — replicate or split them.",
+      "**O(n) commands** (KEYS *, SMEMBERS on huge sets) stall everything; use SCAN.",
+      "**Memory:** set `maxmemory` and an eviction policy, or Redis returns errors when full."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Redis gives me atomic operations on rich data structures in memory — I'd use sorted sets for the leaderboard and a Lua script for the rate limiter — but I'd keep the source of truth in a durable database."
+    }
+   ]
+  }
+ ]
+}

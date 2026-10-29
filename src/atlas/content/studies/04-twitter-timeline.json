@@ -1,0 +1,453 @@
+{
+ "id": "twitter-timeline",
+ "num": 4,
+ "title": "Twitter Timeline",
+ "summary": "Home timelines at scale: fan out tweets on write into cached per-user timelines, pull celebrity tweets at read time, and merge and rank on request.",
+ "tags": [
+  "Fan-out",
+  "Cache",
+  "Ranking",
+  "Hot keys"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "caching",
+  "redis",
+  "queues-kafka",
+  "sharding",
+  "ids"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Post a tweet (text, media), follow users"
+      ],
+      [
+       "Functional",
+       "Home timeline: recent tweets from followed accounts, newest or ranked"
+      ],
+      [
+       "Functional",
+       "User timeline: one user's tweets"
+      ],
+      [
+       "Non-functional",
+       "Home timeline p99 < 200 ms; tweet visible to followers within ~5 s"
+      ],
+      [
+       "Non-functional",
+       "Read-heavy: timeline reads ≫ tweet writes"
+      ],
+      [
+       "Non-functional",
+       "Follower counts from 0 to 100M+ (celebrity problem)"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "DAU",
+       "value": "250M",
+       "sub": ""
+      },
+      {
+       "label": "Tweets / day",
+       "value": "500M",
+       "sub": "≈ 6k/s, 20k peak"
+      },
+      {
+       "label": "Timeline reads / s",
+       "value": "~300k",
+       "sub": "≈ 50:1 read:write"
+      },
+      {
+       "label": "Fan-out writes / s",
+       "value": "~1.2M",
+       "sub": "avg 200 followers"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Reads are 50 times writes, so precomputing timelines pays off, but a single 100-million-follower account would turn one tweet into 100 million writes. That's the core tension."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/tweets            { text, mediaIds[] }       -> { tweetId }\nGET  /v1/timeline/home?cursor&limit=20                -> { tweets[], nextCursor }\nGET  /v1/users/{id}/tweets?cursor\nPOST /v1/follows           { followeeId }"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Data",
+      "Key",
+      "Store"
+     ],
+     "rows": [
+      [
+       "tweets",
+       "tweet_id (Snowflake, time-sortable)",
+       "Distributed KV/wide-column (Manhattan at Twitter), sharded by tweet_id"
+      ],
+      [
+       "user_tweets",
+       "(user_id, tweet_id desc)",
+       "Wide-column, sharded by user_id"
+      ],
+      [
+       "follows",
+       "(follower, followee) and reverse",
+       "Graph service / KV, both directions"
+      ],
+      [
+       "home timeline cache",
+       "user_id → list of ~800 tweet_ids",
+       "Redis lists, in memory"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Timelines store only tweet IDs (8 bytes each); tweet bodies are hydrated from a tweet cache at read time. 250M users × 800 IDs × 8 B ≈ 1.6 TB, spread across a Redis fleet with replicas."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Client",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Tweet service",
+        "kind": "service"
+       },
+       {
+        "label": "Timeline service",
+        "kind": "service",
+        "sub": "read + merge + rank"
+       }
+      ],
+      [
+       {
+        "label": "Tweet store",
+        "kind": "db"
+       },
+       {
+        "label": "Kafka",
+        "kind": "queue",
+        "sub": "tweet events"
+       }
+      ],
+      [
+       {
+        "label": "Fan-out workers",
+        "kind": "service",
+        "sub": "lookup followers"
+       },
+       {
+        "label": "Timeline cache",
+        "kind": "cache",
+        "sub": "Redis lists per user"
+       }
+      ],
+      [
+       {
+        "label": "Social graph",
+        "kind": "db"
+       },
+       {
+        "label": "Tweet / user cache",
+        "kind": "cache",
+        "sub": "hydration"
+       }
+      ]
+     ],
+     "caption": "Write path fans out IDs; read path merges cached timeline with celebrity pulls"
+    },
+    {
+     "t": "list",
+     "items": [
+      "**Write:** store tweet → publish event → fan-out workers fetch followers in pages and `LPUSH` the tweet ID onto each follower's timeline list, trimming to 800.",
+      "**Read:** read the user's cached list, merge in recent tweets from followed celebrities (pulled from their user_tweets), hydrate bodies, rank, return a page."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "fanout",
+   "title": "Deep dive: push vs pull vs hybrid",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Fan-out on write (push)",
+       "pros": [
+        "Reads are O(1) cache reads",
+        "Great for most users"
+       ],
+       "cons": [
+        "Celebrity tweet = millions of writes",
+        "Wasted work for inactive followers"
+       ]
+      },
+      {
+       "title": "Fan-out on read (pull)",
+       "pros": [
+        "Cheap writes",
+        "No wasted work"
+       ],
+       "cons": [
+        "Read must merge N followees",
+        "Slow for users following thousands"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key idea",
+     "text": "Hybrid: push for accounts below a threshold (say 100k followers), pull for celebrities at read time and merge. Skip pushing to users inactive for 30+ days and rebuild their timeline on next login."
+    },
+    {
+     "t": "code",
+     "lang": "python",
+     "text": "def home(user):\n    ids = redis.lrange(f'tl:{user}', 0, 199)              # pushed\n    for celeb in graph.followed_celebrities(user):       # pulled\n        ids += user_tweets.recent(celeb, since=ids_oldest(ids))\n    return rank(hydrate(dedupe(ids)))[:20]"
+    }
+   ]
+  },
+  {
+   "id": "ranking",
+   "title": "Deep dive: ranking",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Candidate generation: in-network (the merged timeline) + out-of-network (recommendations from embeddings / graph).",
+      "Light ranker filters to ~1,500 candidates; heavy ranker (neural network) scores engagement probability.",
+      "Heuristics after ranking: author diversity, remove seen, mix media, filter blocked/muted.",
+      "Cache the ranked page per user for a short time so pagination is stable; cursor = position in that ranked list."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Tip",
+     "text": "In an interview say ranking exists and where it plugs in; don't spend 10 minutes on ML unless asked."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Celebrity tweets",
+       "Fan-out backlog",
+       "Pull path for > threshold accounts"
+      ],
+      [
+       "Timeline cache node lost",
+       "Users see empty timeline",
+       "Replicas; rebuild on miss from followees' user_tweets (slow path)"
+      ],
+      [
+       "Fan-out lag",
+       "Tweets appear late",
+       "Partition Kafka by author; autoscale workers on lag; prioritize active users"
+      ],
+      [
+       "Hot tweet (viral)",
+       "Hydration cache hot key",
+       "Local in-process cache for top tweets"
+      ],
+      [
+       "Deleted tweet",
+       "Still in timelines",
+       "Filter at hydration (tombstone check), lazy removal"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Timeline",
+       "Precomputed (hybrid)",
+       "Memory and write amplification"
+      ],
+      [
+       "Content in cache",
+       "IDs only",
+       "An extra hydration lookup"
+      ],
+      [
+       "Freshness",
+       "Seconds of delay",
+       "Strict real time"
+      ],
+      [
+       "Inactive users",
+       "Not fanned out",
+       "Slower first load after return"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Post, follow, home + user timelines."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "200 ms reads, 5 s freshness, celebrity skew."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "6k tweets/s, 300k reads/s, 1.2M fan-out writes/s."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "Snowflake tweet IDs, ID-only timelines."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Kafka fan-out workers into Redis lists; timeline service merges."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Push vs pull hybrid, ranking pipeline, cache sizing."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Celebrity threshold, inactive users, lag metrics."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "Where does the celebrity threshold come from?",
+       "a": "Tune by cost: when expected fan-out writes exceed the extra read-merge cost across their followers. Often ~100k–1M followers."
+      },
+      {
+       "q": "How do you paginate a ranked feed?",
+       "a": "Rank once, cache the ordered ID list for the session, and page through it with a cursor; new tweets show as a 'new posts' banner."
+      },
+      {
+       "q": "How do you handle unfollow?",
+       "a": "Filter at read time against the follow set; lazily drop entries."
+      },
+      {
+       "q": "How would you add search?",
+       "a": "Separate pipeline: tweets → Kafka → inverted index (Earlybird at Twitter), sharded by time."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Hybrid fan-out: push for normal users, pull for celebrities.",
+      "Timelines hold IDs only; hydrate at read.",
+      "Snowflake IDs give time order for free.",
+      "Skip fan-out to inactive users.",
+      "Ranking: candidates → light ranker → heavy ranker → heuristics.",
+      "Watch fan-out lag and timeline cache hit rate."
+     ]
+    }
+   ]
+  }
+ ]
+}

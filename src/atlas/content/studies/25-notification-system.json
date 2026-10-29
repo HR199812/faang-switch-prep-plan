@@ -1,0 +1,378 @@
+{
+ "id": "notification-system",
+ "num": 25,
+ "title": "Notification System",
+ "summary": "Send push, email and SMS reliably at scale: an API that accepts events, user preferences and templates, per-channel queues and workers, provider failover, dedup, and delivery tracking.",
+ "tags": [
+  "Queues",
+  "Fan-out",
+  "Idempotency",
+  "Preferences"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "queues-kafka",
+  "resilience",
+  "rate-limiting",
+  "patterns",
+  "apis-realtime"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Services trigger notifications to users over push (APNs/FCM), email, SMS, in-app"
+      ],
+      [
+       "Functional",
+       "Respect user preferences, quiet hours and unsubscribes"
+      ],
+      [
+       "Functional",
+       "Templates with localisation; scheduled and bulk sends"
+      ],
+      [
+       "Non-functional",
+       "At-least-once delivery attempts, no duplicate sends to the user"
+      ],
+      [
+       "Non-functional",
+       "Transactional (OTP) within seconds; marketing can lag"
+      ],
+      [
+       "Non-functional",
+       "Survive third-party provider outages"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Ask early: are transactional and marketing traffic separate? (They must not share a queue — a 50M-user campaign shouldn't delay password resets.)"
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Notifications",
+       "value": "~10B / day",
+       "sub": "~115k/s avg"
+      },
+      {
+       "label": "Peak",
+       "value": "~1M/s",
+       "sub": "campaign bursts"
+      },
+      {
+       "label": "Channels",
+       "value": "4",
+       "sub": "push, email, SMS, in-app"
+      },
+      {
+       "label": "SMS cost",
+       "value": "~$0.01",
+       "sub": "per message — rate limit it"
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Throughput is dominated by bulk sends; latency requirements by transactional ones."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/notifications\n{\n  \"idempotency_key\": \"order-123-shipped\",\n  \"user_ids\": [\"u1\"],                 // or a segment id for bulk\n  \"template\": \"order_shipped\",\n  \"data\": {\"order_id\": \"123\"},\n  \"channels\": [\"push\", \"email\"],      // optional; else preference-driven\n  \"priority\": \"transactional\",\n  \"send_at\": null\n}\n-> 202 {notification_id}"
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "The idempotency key makes retries from upstream services safe: the same key within the dedup window returns the original notification id instead of sending again."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Product services",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Notification API",
+        "kind": "edge",
+        "sub": "auth, validation, idempotency"
+       }
+      ],
+      [
+       {
+        "label": "Orchestrator",
+        "kind": "service",
+        "sub": "preferences, templates, routing"
+       },
+       {
+        "label": "Preference store",
+        "kind": "db"
+       },
+       {
+        "label": "Template service",
+        "kind": "cache"
+       }
+      ],
+      [
+       {
+        "label": "Push queue",
+        "kind": "queue"
+       },
+       {
+        "label": "Email queue",
+        "kind": "queue"
+       },
+       {
+        "label": "SMS queue",
+        "kind": "queue"
+       }
+      ],
+      [
+       {
+        "label": "Channel workers",
+        "kind": "service",
+        "sub": "rate limit + retry"
+       },
+       {
+        "label": "APNs / FCM / SES / Twilio",
+        "kind": "ext"
+       }
+      ],
+      [
+       {
+        "label": "Delivery log",
+        "kind": "db",
+        "sub": "status per attempt"
+       }
+      ]
+     ],
+     "caption": "Accept fast, deliver asynchronously per channel"
+    },
+    {
+     "t": "list",
+     "items": [
+      "API writes the request and returns 202; the orchestrator expands segments, applies preferences/quiet hours, renders templates.",
+      "Per-channel (and per-priority) queues isolate failures and let each channel scale independently.",
+      "Workers call providers, record status, and retry with backoff; provider callbacks (delivered, bounced) update the log."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "deep-reliability",
+   "title": "Deep dive: reliability and dedup",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "At-least-once queues + **idempotent workers**: before sending, check (notification_id, channel, user) in a dedup store with a TTL.",
+      "Retries with exponential backoff and jitter; after N failures → dead-letter queue for inspection.",
+      "**Provider failover:** keep two providers per channel; a circuit breaker trips to the secondary when error rates spike.",
+      "Invalid push tokens (410 from APNs) must delete the token, or you'll keep paying to fail."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Calling email/SMS providers synchronously from the API request. One slow provider then backs up every product service that sends notifications."
+    }
+   ]
+  },
+  {
+   "id": "deep-fanout",
+   "title": "Deep dive: bulk sends and rate limits",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Segment expansion",
+       "text": "A campaign to 50M users is split into batches of ~1k users and enqueued gradually."
+      },
+      {
+       "title": "Throttling",
+       "text": "Token buckets per provider (and per destination domain for email) keep you under provider quotas and sender reputation limits."
+      },
+      {
+       "title": "Per-user caps",
+       "text": "Limit notifications per user per day; collapse duplicates (\"3 new messages\")."
+      },
+      {
+       "title": "Scheduling",
+       "text": "Store send_at; a scheduler moves due jobs to the queue; time-zone-aware sends are bucketed by zone."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Separate queues and worker pools for transactional vs bulk — the noisy-neighbour problem is the classic failure.",
+      "Shard the delivery log by notification id; keep it in a write-optimised store (Cassandra/Dynamo) with TTL.",
+      "In-app notifications are just rows in an inbox table plus a realtime push over the app's WebSocket.",
+      "Monitor per-channel success rate, latency and cost; alert on provider degradation."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "One queue for all",
+       "pros": [
+        "Simple"
+       ],
+       "cons": [
+        "Bulk traffic starves transactional",
+        "One provider outage blocks everything"
+       ]
+      },
+      {
+       "title": "Queue per channel × priority",
+       "pros": [
+        "Isolation",
+        "Independent scaling and retry policy"
+       ],
+       "cons": [
+        "More moving parts to operate"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Accept the request fast with an idempotency key, then deliver asynchronously through per-channel, per-priority queues with idempotent workers and provider failover."
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "Channels, transactional vs marketing, preferences."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Avg vs peak; SMS cost."
+      },
+      {
+       "min": "10–20",
+       "title": "API + HLD",
+       "text": "Idempotency key, orchestrator, per-channel queues."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "Dedup, retries/DLQ, failover, bulk throttling."
+      },
+      {
+       "min": "35–45",
+       "title": "Scale",
+       "text": "Isolation, delivery log, monitoring."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you guarantee no duplicate SMS?",
+       "a": "You can't guarantee exactly-once with an external provider, but dedup keys before send plus provider-side idempotency (where supported) make duplicates rare."
+      },
+      {
+       "q": "How do you handle quiet hours across time zones?",
+       "a": "Store user time zone; if now is inside quiet hours, set send_at to the end of the window (unless priority is critical)."
+      },
+      {
+       "q": "How do you track opens/clicks?",
+       "a": "Tracking pixel and redirect links for email; app analytics events for push."
+      },
+      {
+       "q": "What if the preference service is down?",
+       "a": "Fail closed for marketing (don't send), fail open with cached preferences for transactional."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "202 + idempotency key.",
+      "Orchestrator: preferences, templates, segment expansion.",
+      "Queue per channel × priority.",
+      "Idempotent workers, backoff, DLQ, provider circuit breakers.",
+      "Token buckets per provider; per-user caps."
+     ]
+    }
+   ]
+  }
+ ]
+}

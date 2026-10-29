@@ -1,0 +1,402 @@
+{
+ "minutes": 14,
+ "sections": [
+  {
+   "id": "problem",
+   "title": "The problem, properly stated",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Almost every system needs identifiers for rows, messages, orders or URLs. On one database server this is trivial: an auto-increment column hands out 1, 2, 3… But as soon as writes are spread across many database shards or many application servers, a single counter becomes a bottleneck and a single point of failure, and two shards each counting from 1 will produce collisions."
+    },
+    {
+     "t": "p",
+     "text": "So the real question is: **how do many machines independently mint IDs that never collide, without talking to each other on every request?** Secondary requirements decide which scheme you pick:"
+    },
+    {
+     "t": "table",
+     "head": [
+      "Requirement",
+      "Why it matters",
+      "Who needs it"
+     ],
+     "rows": [
+      [
+       "Globally unique",
+       "Two different things must never share an ID",
+       "Everyone"
+      ],
+      [
+       "Roughly time-ordered",
+       "Sorting by ID ≈ sorting by creation time; B-tree inserts land at the end of the index",
+       "Feeds, chat messages, logs"
+      ],
+      [
+       "Compact (64-bit)",
+       "Fits a BIGINT; smaller indexes and foreign keys than 128-bit",
+       "High-volume tables"
+      ],
+      [
+       "Unguessable",
+       "Prevents enumeration (`/orders/1001`, `/orders/1002`…)",
+       "Public-facing IDs"
+      ],
+      [
+       "No coordination per ID",
+       "Generation must not be a network round trip on the hot path",
+       "High write rates"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "landscape",
+   "title": "The four families of solutions",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Central counter (DB sequence, Redis INCR)",
+       "pros": [
+        "Simple; dense, strictly ordered integers"
+       ],
+       "cons": [
+        "Every ID is a network call; the counter is a SPOF and a throughput ceiling"
+       ]
+      },
+      {
+       "title": "Range allocation (ticket server, Hi/Lo)",
+       "pros": [
+        "Each server leases a block of 1,000 IDs, then generates locally",
+        "Few coordination calls"
+       ],
+       "cons": [
+        "Gaps when servers restart; IDs only roughly ordered across servers"
+       ]
+      },
+      {
+       "title": "Random (UUIDv4)",
+       "pros": [
+        "Zero coordination; anyone can generate offline",
+        "Unguessable"
+       ],
+       "cons": [
+        "128 bits; random order fragments B-tree indexes; no time info"
+       ]
+      },
+      {
+       "title": "Structured time-based (Snowflake, ULID, UUIDv7)",
+       "pros": [
+        "Local generation, sortable by time, compact (64-bit Snowflake)"
+       ],
+       "cons": [
+        "Depends on clocks; needs unique worker ids"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd generate IDs locally with a Snowflake-style scheme: 64-bit, time-ordered, no coordination per ID — the only thing coordinated is the worker id, once at startup."
+    }
+   ]
+  },
+  {
+   "id": "snowflake",
+   "title": "How Snowflake works, bit by bit",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Twitter's Snowflake packs three fields into a signed 64-bit integer. Because the timestamp occupies the most significant bits, numeric order is (approximately) creation-time order."
+    },
+    {
+     "t": "bits",
+     "fields": [
+      {
+       "label": "sign",
+       "bits": 1,
+       "sub": "always 0 → positive"
+      },
+      {
+       "label": "timestamp",
+       "bits": 41,
+       "sub": "ms since a custom epoch ≈ 69 years"
+      },
+      {
+       "label": "worker id",
+       "bits": 10,
+       "sub": "1,024 generators"
+      },
+      {
+       "label": "sequence",
+       "bits": 12,
+       "sub": "4,096 IDs / ms / worker"
+      }
+     ],
+     "caption": "Snowflake: 1 + 41 + 10 + 12 = 64 bits"
+    },
+    {
+     "t": "list",
+     "items": [
+      "**Timestamp (41 bits):** milliseconds since a custom epoch (e.g. 2020-01-01). 2^41 ms ≈ 69.7 years before overflow — pick the epoch close to your launch date.",
+      "**Worker id (10 bits):** unique per generating process (often split into 5 bits datacenter + 5 bits machine). This is the only coordination: assign it once, at startup.",
+      "**Sequence (12 bits):** a per-millisecond counter on that worker; 4,096 IDs per millisecond = ~4M IDs/s per worker. If exhausted, spin until the next millisecond."
+     ]
+    },
+    {
+     "t": "code",
+     "lang": "js",
+     "text": "// One generator per process.\nconst EPOCH = 1577836800000n;           // 2020-01-01\nlet lastMs = -1n, seq = 0n;\n\nfunction nextId(workerId /* 0..1023 */) {\n  let now = BigInt(Date.now());\n  if (now < lastMs) throw new Error(\"clock moved backwards\");   // see below\n  if (now === lastMs) {\n    seq = (seq + 1n) & 4095n;\n    if (seq === 0n) while ((now = BigInt(Date.now())) <= lastMs) {}  // wait for next ms\n  } else seq = 0n;\n  lastMs = now;\n  return ((now - EPOCH) << 22n) | (BigInt(workerId) << 12n) | seq;\n}"
+    }
+   ]
+  },
+  {
+   "id": "flow",
+   "title": "Where the generator lives",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "App server 1",
+        "kind": "service",
+        "sub": "worker 17"
+       },
+       {
+        "label": "App server 2",
+        "kind": "service",
+        "sub": "worker 18"
+       },
+       {
+        "label": "App server N",
+        "kind": "service",
+        "sub": "worker …"
+       }
+      ],
+      [
+       {
+        "label": "Worker-id registry",
+        "kind": "db",
+        "sub": "ZooKeeper / etcd / DB lease — at startup only"
+       }
+      ],
+      [
+       {
+        "label": "Database shards",
+        "kind": "db",
+        "sub": "insert with pre-generated id"
+       }
+      ]
+     ],
+     "caption": "Each app server mints IDs locally; coordination happens once"
+    },
+    {
+     "t": "seq",
+     "actors": [
+      "App server",
+      "Registry (etcd)",
+      "Database"
+     ],
+     "steps": [
+      {
+       "from": "App server",
+       "to": "Registry (etcd)",
+       "label": "lease /workers/17",
+       "note": "TTL 30 s, renewed by heartbeat"
+      },
+      {
+       "from": "Registry (etcd)",
+       "to": "App server",
+       "label": "OK: you are worker 17",
+       "dashed": true
+      },
+      {
+       "from": "App server",
+       "to": "App server",
+       "label": "nextId() ×10,000",
+       "note": "pure CPU, no I/O"
+      },
+      {
+       "from": "App server",
+       "to": "Database",
+       "label": "INSERT … id=742…",
+       "note": "id already known"
+      },
+      {
+       "from": "App server",
+       "to": "Registry (etcd)",
+       "label": "renew lease",
+       "note": "if lost → stop generating",
+       "dashed": true
+      }
+     ],
+     "caption": "Assigning a worker id at boot, then generating with zero network calls"
+    },
+    {
+     "t": "p",
+     "text": "Generating the ID before the insert has a practical bonus: the application knows the ID up front, so it can write to several tables, publish events and return the ID to the client without waiting for a DB round trip."
+    }
+   ]
+  },
+  {
+   "id": "clocks",
+   "title": "The hard part: clocks",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Snowflake's correctness rests on the timestamp never going backwards on a given worker. Real clocks do go backwards: NTP corrections, leap-second smearing, VM migrations. If the clock jumps back by 5 ms and the sequence resets, the worker can re-issue an ID it already issued."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Strategy",
+      "Behaviour",
+      "Trade-off"
+     ],
+     "rows": [
+      [
+       "Refuse",
+       "Throw / return an error until the clock catches up",
+       "Safe; brief unavailability"
+      ],
+      [
+       "Wait",
+       "Sleep until now() > lastMs (if the skew is small, e.g. < 10 ms)",
+       "Safe; adds latency"
+      ],
+      [
+       "Logical clock",
+       "Keep using lastMs and keep incrementing the sequence (borrowing future ms)",
+       "Never blocks; timestamps drift ahead"
+      ],
+      [
+       "Spare bits",
+       "Reserve bits for a 'clock epoch' that is bumped after a backwards jump",
+       "More complex; fewer sequence bits"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Two processes accidentally sharing a worker id. They'll generate identical IDs in the same millisecond. Use a lease (with TTL and fencing) rather than a static config value, and stop generating if the lease is lost."
+    }
+   ]
+  },
+  {
+   "id": "alternatives",
+   "title": "ULID, UUIDv7 and friends",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Scheme",
+      "Size",
+      "Layout",
+      "When to choose it"
+     ],
+     "rows": [
+      [
+       "UUIDv4",
+       "128 bits",
+       "122 random bits",
+       "IDs must be unguessable and ordering doesn't matter"
+      ],
+      [
+       "UUIDv7 (RFC 9562)",
+       "128 bits",
+       "48-bit Unix ms timestamp + random",
+       "You want UUIDs (standard column type) but time-ordered inserts"
+      ],
+      [
+       "ULID",
+       "128 bits",
+       "48-bit ms timestamp + 80 random bits; Crockford base32 text",
+       "Human-friendly sortable strings, no worker ids"
+      ],
+      [
+       "Snowflake",
+       "64 bits",
+       "time + worker + sequence",
+       "Compact BIGINT keys at very high rates"
+      ],
+      [
+       "Sonyflake",
+       "64 bits",
+       "39-bit 10 ms time + 8 seq + 16 machine",
+       "Longer lifespan (174 years), more machines, fewer IDs per ms"
+      ],
+      [
+       "Instagram-style",
+       "64 bits",
+       "41 time + 13 shard id + 10 sequence, generated in Postgres",
+       "The ID encodes which shard the row lives on"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Time-ordered IDs matter for databases: random UUIDv4 primary keys insert all over a B-tree, causing page splits and poor cache locality. UUIDv7 / ULID / Snowflake append near the right edge of the index."
+    }
+   ]
+  },
+  {
+   "id": "ordering",
+   "title": "What \"time-ordered\" does and doesn't guarantee",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "IDs from one worker are strictly increasing.",
+      "IDs from different workers are only ordered to within clock skew (a few ms). Two events 1 ms apart on different machines may sort the wrong way round.",
+      "If you need a strict global order (a ledger, a chat channel), assign a **sequence per partition** (e.g. per channel, via the partition leader) rather than relying on ID order.",
+      "Don't expose sequential integers publicly if enumeration is a risk; expose a random or encrypted public id and keep the Snowflake internal."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "decide",
+   "title": "Decision guide",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Situation",
+      "Pick"
+     ],
+     "rows": [
+      [
+       "Single database, modest scale",
+       "DB auto-increment / sequence"
+      ],
+      [
+       "Many shards, need BIGINT and time order",
+       "Snowflake with leased worker ids"
+      ],
+      [
+       "Clients generate IDs offline (mobile, distributed edge)",
+       "UUIDv7 or ULID"
+      ],
+      [
+       "Public, unguessable identifiers (share links)",
+       "UUIDv4 or random base62 tokens"
+      ],
+      [
+       "Short IDs for URLs (bit.ly)",
+       "Range-allocated counter encoded in base62, or random base62 with collision check"
+      ]
+     ]
+    }
+   ]
+  }
+ ]
+}

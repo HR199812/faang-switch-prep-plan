@@ -1,0 +1,439 @@
+{
+ "id": "apache-kafka",
+ "num": 6,
+ "title": "Apache Kafka",
+ "summary": "Design a distributed commit log: partitioned append-only segments on disk, leader-follower replication with an in-sync replica set, and consumers that track their own offsets.",
+ "tags": [
+  "Logs",
+  "Replication",
+  "Consumers",
+  "Durability"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "queues-kafka",
+  "consensus",
+  "replication",
+  "patterns"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Producers append messages to named topics; consumers read in order"
+      ],
+      [
+       "Functional",
+       "Many independent consumer groups; replay from any offset"
+      ],
+      [
+       "Functional",
+       "Retention by time/size; optional compaction by key"
+      ],
+      [
+       "Non-functional",
+       "Millions of messages/s per cluster; low ms latency"
+      ],
+      [
+       "Non-functional",
+       "No loss of acknowledged messages when a broker dies"
+      ],
+      [
+       "Non-functional",
+       "Ordering per key"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Ingest",
+       "value": "2 GB/s",
+       "sub": "≈ 2M msgs/s × 1 KB"
+      },
+      {
+       "label": "Retention 7 d",
+       "value": "≈ 1.2 PB",
+       "sub": "with RF=3"
+      },
+      {
+       "label": "Per broker",
+       "value": "~100–200 MB/s",
+       "sub": "disk + network bound"
+      },
+      {
+       "label": "Brokers",
+       "value": "~40",
+       "sub": "with headroom"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "At 2 GB/s ingest with replication factor 3, the network carries about 6 GB/s of writes. The design has to be sequential I/O end to end."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "text",
+     "text": "produce(topic, key, value, headers) -> (partition, offset)      acks = 0 | 1 | all\nfetch(topic, partition, offset, maxBytes) -> records[]\ncommit(group, topic, partition, offset)\nsubscribe(group, topics) -> partition assignment via group coordinator"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Storage layout",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Concept",
+      "What it is"
+     ],
+     "rows": [
+      [
+       "Topic",
+       "Named stream, split into P partitions"
+      ],
+      [
+       "Partition",
+       "Ordered append-only log; unit of parallelism and ordering"
+      ],
+      [
+       "Segment",
+       "Partition stored as files of ~1 GB: `00000000000005000000.log` + `.index` (offset → byte position) + `.timeindex`"
+      ],
+      [
+       "Offset",
+       "Monotonic position of a record in its partition"
+      ],
+      [
+       "Consumer offsets",
+       "Stored in internal compacted topic `__consumer_offsets`"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Only the active segment is written; old segments are immutable, so retention just deletes whole files and compaction rewrites them in the background."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Producers",
+        "kind": "client",
+        "sub": "batch + compress"
+       }
+      ],
+      [
+       {
+        "label": "Broker 1",
+        "kind": "service",
+        "sub": "leader P0"
+       },
+       {
+        "label": "Broker 2",
+        "kind": "service",
+        "sub": "leader P1"
+       },
+       {
+        "label": "Broker 3",
+        "kind": "service",
+        "sub": "leader P2"
+       }
+      ],
+      [
+       {
+        "label": "Controller quorum",
+        "kind": "service",
+        "sub": "KRaft (Raft)"
+       }
+      ],
+      [
+       {
+        "label": "Consumer group A",
+        "kind": "client"
+       },
+       {
+        "label": "Consumer group B",
+        "kind": "client"
+       }
+      ]
+     ],
+     "caption": "Leaders take writes; followers replicate; the controller manages metadata"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Producer partitions by hash(key), batches records per partition, sends to the partition leader.",
+      "Leader appends to its log; followers fetch from the leader (pull replication).",
+      "With `acks=all`, the leader replies once all in-sync replicas have the batch.",
+      "Consumers fetch from leaders (or nearby followers), process, commit offsets."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "replication",
+   "title": "Deep dive: replication and the ISR",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Each partition has a leader and RF−1 followers. The **ISR** is the set of replicas caught up within `replica.lag.time.max.ms`.",
+      "**High watermark** = highest offset replicated to all ISR members; consumers only see up to it.",
+      "`acks=all` + `min.insync.replicas=2` + RF=3: a write succeeds only if at least 2 copies have it; one broker can die with no loss.",
+      "If ISR shrinks below min.insync, producers get errors instead of silent data loss (availability traded for durability).",
+      "Leader election picks from the ISR; `unclean.leader.election=false` forbids electing a stale replica.",
+      "Leader epochs let a returning replica truncate divergent entries."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Durability comes from acks=all with min.insync.replicas=2 on replication factor 3: we can lose a broker and still never lose an acknowledged message."
+    }
+   ]
+  },
+  {
+   "id": "speed",
+   "title": "Deep dive: why it's fast",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Sequential append to the OS page cache; disks do what they're best at.",
+      "Zero-copy `sendfile` from page cache to socket for consumers.",
+      "Batching and compression (lz4/zstd) per batch, end to end — brokers don't decompress.",
+      "Consumers pull at their own pace; no per-message acks on the broker.",
+      "Sparse offset index makes seeks cheap."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Tip",
+     "text": "Tiered storage moves old segments to S3 so brokers keep only recent data on local disks."
+    }
+   ]
+  },
+  {
+   "id": "consumers",
+   "title": "Deep dive: consumer groups and exactly-once",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Within a group each partition is owned by one consumer; max parallelism = partitions.",
+      "Rebalances reassign partitions when members join/leave; cooperative sticky assignment avoids stop-the-world.",
+      "Idempotent producer: (producer ID, sequence number) per partition lets the broker drop duplicates on retry.",
+      "Transactions: atomically write to several partitions and commit consumer offsets — exactly-once for read-process-write within Kafka.",
+      "External side effects still need idempotent consumers."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Broker dies",
+       "Its leader partitions unavailable briefly",
+       "Controller elects new leaders from ISR in seconds"
+      ],
+      [
+       "Slow follower",
+       "Drops out of ISR",
+       "Alert on under-replicated partitions"
+      ],
+      [
+       "Hot partition (skewed key)",
+       "One broker overloaded",
+       "Better key, more partitions, salt hot keys"
+      ],
+      [
+       "Consumer lag",
+       "Stale downstream",
+       "Scale consumers up to partition count; alert on lag"
+      ],
+      [
+       "Too many partitions",
+       "Slow failover, metadata load",
+       "Plan partitions to throughput; KRaft raises limits"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Ordering",
+       "Per partition only",
+       "Global order"
+      ],
+      [
+       "Replication",
+       "Pull by followers",
+       "Push latency"
+      ],
+      [
+       "Delivery",
+       "Consumers track offsets",
+       "Per-message broker acks / routing"
+      ],
+      [
+       "Metadata",
+       "KRaft quorum",
+       "ZooKeeper dependency"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Append, read in order, replay, retention."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Millions/s, no acked loss, per-key order."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "2 GB/s, RF 3, ~40 brokers."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "Produce/fetch/commit; segments + index."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Partition leaders, followers, controller quorum, consumer groups."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "ISR + high watermark, sequential I/O, exactly-once."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Lag, under-replicated partitions, hot partitions."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How many partitions should a topic have?",
+       "a": "Target throughput ÷ per-partition throughput (producer and consumer side), plus headroom; increasing later breaks key→partition mapping."
+      },
+      {
+       "q": "What's log compaction for?",
+       "a": "Keep the latest value per key forever (changelogs, state snapshots); tombstones delete keys."
+      },
+      {
+       "q": "How does a consumer find offset N?",
+       "a": "Pick the segment by base offset, binary-search the sparse index for the nearest position, scan forward."
+      },
+      {
+       "q": "Kafka vs RabbitMQ?",
+       "a": "Kafka is a retained, replayable log with partition ordering; RabbitMQ is a broker with routing and per-message acks for task queues."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Partition = ordered append-only log in ~1 GB segments.",
+      "RF 3 + acks=all + min.insync 2 = no acked loss.",
+      "High watermark: consumers read only fully replicated data.",
+      "Speed: sequential I/O, page cache, zero-copy, batching.",
+      "One consumer per partition per group.",
+      "Idempotent producer + transactions = EOS inside Kafka."
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,229 @@
+{
+ "minutes": 14,
+ "sections": [
+  {
+   "id": "why",
+   "title": "What microservices buy you — and cost you",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Microservices split a system into independently deployable services, each owning a business capability and its data. The benefits are organisational as much as technical: teams ship independently, services scale independently, and failures can be isolated. The costs are distributed-systems costs: network calls instead of function calls, partial failures, eventual consistency, and much more operational surface area."
+    },
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Modular monolith",
+       "pros": [
+        "One deploy, in-process calls, ACID across modules",
+        "Fastest for small teams"
+       ],
+       "cons": [
+        "Scales as one unit; one bad deploy affects everything"
+       ]
+      },
+      {
+       "title": "Microservices",
+       "pros": [
+        "Independent deploys and scaling; fault isolation",
+        "Team autonomy"
+       ],
+       "cons": [
+        "Network latency and failures; distributed data; heavy ops tooling"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "edge",
+   "title": "The edge: API gateway and BFF",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Web app",
+        "kind": "client"
+       },
+       {
+        "label": "Mobile app",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "API gateway",
+        "kind": "edge",
+        "sub": "auth, rate limit, routing"
+       }
+      ],
+      [
+       {
+        "label": "Web BFF",
+        "kind": "service",
+        "sub": "aggregates for web"
+       },
+       {
+        "label": "Mobile BFF",
+        "kind": "service",
+        "sub": "aggregates for mobile"
+       }
+      ],
+      [
+       {
+        "label": "Users",
+        "kind": "service"
+       },
+       {
+        "label": "Orders",
+        "kind": "service"
+       },
+       {
+        "label": "Catalog",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Users DB",
+        "kind": "db"
+       },
+       {
+        "label": "Orders DB",
+        "kind": "db"
+       },
+       {
+        "label": "Catalog DB",
+        "kind": "db"
+       }
+      ]
+     ],
+     "caption": "Request path in a microservice architecture"
+    },
+    {
+     "t": "list",
+     "items": [
+      "The gateway handles cross-cutting concerns once: TLS, authentication, rate limits, request ids.",
+      "A **Backend-for-Frontend** composes several service calls into the exact shape a screen needs, so phones don't make 12 round trips.",
+      "Each service owns its database; others access the data only via its API or events."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "discovery",
+   "title": "Service discovery",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Orders",
+      "Registry (Consul / k8s)",
+      "Payments #1",
+      "Payments #2"
+     ],
+     "steps": [
+      {
+       "from": "Payments #1",
+       "to": "Registry (Consul / k8s)",
+       "label": "register + health checks"
+      },
+      {
+       "from": "Payments #2",
+       "to": "Registry (Consul / k8s)",
+       "label": "register + health checks"
+      },
+      {
+       "from": "Orders",
+       "to": "Registry (Consul / k8s)",
+       "label": "resolve 'payments'"
+      },
+      {
+       "from": "Registry (Consul / k8s)",
+       "to": "Orders",
+       "label": "[#1, #2] healthy",
+       "dashed": true
+      },
+      {
+       "from": "Orders",
+       "to": "Payments #2",
+       "label": "POST /charge",
+       "note": "client picks one"
+      }
+     ],
+     "caption": "Client-side discovery with a registry"
+    },
+    {
+     "t": "p",
+     "text": "In Kubernetes, a Service object gives a stable DNS name and virtual IP that load-balances across healthy pods; a service mesh adds smarter, per-request balancing."
+    }
+   ]
+  },
+  {
+   "id": "communication",
+   "title": "Synchronous vs asynchronous communication",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Sync (REST/gRPC)** when the caller needs the answer to continue (\"is this payment authorised?\"). Add timeouts, retries, circuit breakers.",
+      "**Async (events)** when the caller just needs to announce something happened (\"OrderPlaced\"). Consumers react independently; producers don't know or wait for them.",
+      "Avoid long synchronous chains: availability multiplies (five 99.9% services in series ≈ 99.5%) and latencies add."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Prefer events for propagating state changes between services and synchronous calls only for queries that genuinely need a real-time answer."
+    }
+   ]
+  },
+  {
+   "id": "mesh",
+   "title": "Service mesh",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "A service mesh (Istio, Linkerd) injects a sidecar proxy next to every service instance. The sidecars handle mTLS, retries, timeouts, circuit breaking, traffic splitting for canaries and uniform telemetry, configured from a central control plane. It removes boilerplate from every codebase at the cost of extra hops (~1 ms), resource overhead and a complex control plane to operate."
+    }
+   ]
+  },
+  {
+   "id": "data",
+   "title": "Data in a microservice world",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Database per service** — sharing tables couples deploys and schemas.",
+      "Cross-service consistency via **sagas** and the **transactional outbox**, not distributed transactions.",
+      "Queries that span services: build a read model (CQRS) fed by events, or compose in a BFF.",
+      "Reference data other services need: replicate it via events into local read-only copies."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pitfalls",
+   "title": "Pitfalls",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "The distributed monolith: services that must be deployed together, share a database, or call each other synchronously in long chains. You pay the costs of microservices and get none of the benefits."
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd start with a few coarse services split by business capability, each owning its data, talking via events for state changes and gRPC for real-time queries, behind a gateway with per-client BFFs."
+    }
+   ]
+  }
+ ]
+}

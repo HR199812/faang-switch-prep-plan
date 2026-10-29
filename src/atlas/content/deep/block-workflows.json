@@ -1,0 +1,167 @@
+{
+ "minutes": 14,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Why long-running processes are hard",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Some business processes take minutes or days and involve several services: onboarding a merchant (KYC check → bank verification → manual review → activation), fulfilling an order, running a video through transcoding and moderation. Any step can fail or time out; processes must survive deploys and machine crashes; and someone will ask \"where is order 123 stuck?\". Hand-rolling this with queues, cron jobs and status columns works at first, then turns into an unmaintainable web of retries and edge cases."
+    }
+   ]
+  },
+  {
+   "id": "options",
+   "title": "From simplest to most robust",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Approach",
+      "Good for",
+      "Breaks down when"
+     ],
+     "rows": [
+      [
+       "Async job queue + workers",
+       "Single-step background tasks (resize image, send email)",
+       "Multiple dependent steps with compensation"
+      ],
+      [
+       "Status column + polling scheduler",
+       "Simple state machines with few states",
+       "Many states, timers, retries per step"
+      ],
+      [
+       "Choreographed events (saga)",
+       "Loosely coupled steps across teams",
+       "You need visibility and control over the whole flow"
+      ],
+      [
+       "Workflow engine (Temporal, Step Functions, Cadence)",
+       "Multi-step, long-running, must-not-lose processes",
+       "Very high-throughput, trivially simple tasks (overhead)"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "durable",
+   "title": "Durable execution, explained",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Workflow code",
+      "Engine (history)",
+      "Activity worker",
+      "Payment API"
+     ],
+     "steps": [
+      {
+       "from": "Workflow code",
+       "to": "Engine (history)",
+       "label": "schedule activity: charge()"
+      },
+      {
+       "from": "Engine (history)",
+       "to": "Activity worker",
+       "label": "task: charge order 123"
+      },
+      {
+       "from": "Activity worker",
+       "to": "Payment API",
+       "label": "charge (idempotency key = wf:123:charge)"
+      },
+      {
+       "from": "Activity worker",
+       "to": "Engine (history)",
+       "label": "result: ok → appended to history"
+      },
+      {
+       "from": "Workflow code",
+       "to": "Workflow code",
+       "label": "worker crashes ✕"
+      },
+      {
+       "from": "Engine (history)",
+       "to": "Workflow code",
+       "label": "new worker replays history",
+       "note": "charge() returns recorded result"
+      },
+      {
+       "from": "Workflow code",
+       "to": "Engine (history)",
+       "label": "schedule next: reserveInventory()"
+      }
+     ],
+     "caption": "How a workflow engine survives a crash"
+    },
+    {
+     "t": "p",
+     "text": "The workflow function is ordinary code (`await charge(); await reserve(); await sleep('3 days'); await remind();`), but every result is recorded in an event history. After a crash, the engine replays the function against the history: completed activities return their recorded results instantly, so execution resumes exactly where it left off. Timers of days or months are just durable events."
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Workflow code must be deterministic (no random numbers, clock reads or I/O) because it's replayed. Side effects belong in activities, which are retried with their own timeouts and must be idempotent."
+    }
+   ]
+  },
+  {
+   "id": "saga",
+   "title": "Compensation for multi-service transactions",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "ts",
+     "text": "async function placeOrder(order) {\n  const comp: Array<() => Promise<void>> = [];\n  try {\n    await activities.authorisePayment(order);  comp.push(() => activities.voidPayment(order));\n    await activities.reserveStock(order);      comp.push(() => activities.releaseStock(order));\n    await activities.createShipment(order);\n  } catch (err) {\n    for (const undo of comp.reverse()) await undo();   // run compensations in reverse\n    throw err;\n  }\n}"
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "Exposing long-running work to clients",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Return **202 Accepted** with a job/workflow id immediately.",
+      "Clients poll `GET /jobs/{id}`, or subscribe via SSE/WebSocket, or receive a webhook on completion.",
+      "Store progress and partial results so the UI can show \"step 3 of 5\".",
+      "Support cancellation as a signal to the workflow, which runs compensations."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pitfalls",
+   "title": "Pitfalls",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Holding an HTTP request open for a multi-minute task. Load balancers time out, clients retry, and you get duplicates. Make it asynchronous."
+    },
+    {
+     "t": "list",
+     "items": [
+      "Non-idempotent activities duplicate side effects on retry.",
+      "Huge payloads in workflow history — store blobs externally and pass references.",
+      "Unbounded retries of permanent errors — classify errors as retryable or not."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd model checkout as a Temporal workflow: each step is an idempotent activity with its own timeout and retry policy, compensations run in reverse on failure, and the API returns 202 with a workflow id the client can poll."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,360 @@
+{
+ "id": "google-maps",
+ "num": 29,
+ "title": "Google Maps",
+ "summary": "Serve map tiles, compute routes and ETAs: pre-rendered vector tiles on a CDN, a road graph partitioned for fast shortest paths, live traffic from location pings, and geocoding.",
+ "tags": [
+  "Tiles",
+  "Routing",
+  "Graph",
+  "Traffic"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "geospatial",
+  "cdn",
+  "stream-processing",
+  "caching",
+  "sharding"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Render the map at any zoom; search places / addresses (geocoding)"
+      ],
+      [
+       "Functional",
+       "Route from A to B by car/walk/transit with ETA; reroute on traffic"
+      ],
+      [
+       "Functional",
+       "Navigation with live traffic"
+      ],
+      [
+       "Non-functional",
+       "Tile load < 100 ms; route p99 < 1 s"
+      ],
+      [
+       "Non-functional",
+       "Global scale: ~1B monthly users"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Tiles",
+       "value": "~zoom 0–21",
+       "sub": "4^z tiles per zoom"
+      },
+      {
+       "label": "Route requests",
+       "value": "~100k/s peak"
+      },
+      {
+       "label": "Location pings",
+       "value": "~1M/s",
+       "sub": "from navigating devices"
+      },
+      {
+       "label": "Road graph",
+       "value": "~billions of edges",
+       "sub": "worldwide"
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Tiles are static and cacheable; routing is CPU-heavy; traffic ingest is a streaming problem."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Mobile / web client",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "CDN",
+        "kind": "edge",
+        "sub": "vector tiles"
+       },
+       {
+        "label": "API gateway",
+        "kind": "edge"
+       }
+      ],
+      [
+       {
+        "label": "Tile service",
+        "kind": "service",
+        "sub": "pre-rendered pyramid"
+       },
+       {
+        "label": "Routing service",
+        "kind": "service",
+        "sub": "graph in memory"
+       },
+       {
+        "label": "Geocoding / search",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Tile store",
+        "kind": "store"
+       },
+       {
+        "label": "Road graph + overlays",
+        "kind": "db"
+       },
+       {
+        "label": "Traffic pipeline",
+        "kind": "queue",
+        "sub": "pings → segment speeds"
+       }
+      ]
+     ],
+     "caption": "Three mostly independent systems"
+    }
+   ]
+  },
+  {
+   "id": "deep-tiles",
+   "title": "Deep dive: map tiles",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "The world is projected (Web Mercator) and cut into a quadtree of 256×256 tiles: zoom z has 4^z tiles addressed by (z, x, y).",
+      "Modern clients fetch **vector tiles** (geometry + labels) and render on device — smaller than raster, restylable, rotatable.",
+      "Pre-generate popular zooms; generate deep zooms on demand and cache. Everything is behind a CDN with long TTLs and versioned URLs."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Tiles are a static, content-addressed pyramid — it's a CDN problem, not a database problem."
+    }
+   ]
+  },
+  {
+   "id": "deep-routing",
+   "title": "Deep dive: routing",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Dijkstra / A*",
+       "pros": [
+        "Simple, exact",
+        "A* with a distance heuristic cuts work"
+       ],
+       "cons": [
+        "Too slow on a continental graph for interactive latency"
+       ]
+      },
+      {
+       "title": "Contraction hierarchies / partitioned graphs",
+       "pros": [
+        "Preprocess shortcut edges once; queries touch thousands of nodes instead of millions",
+        "Partition into regions with boundary nodes for distributed queries"
+       ],
+       "cons": [
+        "Preprocessing cost; live traffic weights need customisable variants (e.g. CRP)"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Edge weights = travel time, from historical speed profiles per time of day blended with live traffic.",
+      "ETA = sum of predicted segment times along the route (ML models refine with turn costs, signals, etc.)."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "deep-traffic",
+   "title": "Deep dive: live traffic",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Ingest",
+       "text": "Navigating devices send (lat, lng, speed, ts) every few seconds into a stream (Kafka)."
+      },
+      {
+       "title": "Map-match",
+       "text": "Snap noisy GPS points to road segments (HMM map matching)."
+      },
+      {
+       "title": "Aggregate",
+       "text": "Stream processing computes speed per segment over sliding windows."
+      },
+      {
+       "title": "Publish",
+       "text": "Update edge weights in routing servers and the traffic overlay tiles every ~minute."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Tip",
+     "text": "Anonymise and aggregate pings — individual location traces are sensitive."
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Routing servers hold a regional graph in memory; replicate per region; long routes stitch regions via boundary nodes.",
+      "Reroute: client checks deviation; server re-plans from current position.",
+      "Offline maps: download a region's tiles + routing graph to the device."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Raster tiles",
+       "pros": [
+        "Simple clients"
+       ],
+       "cons": [
+        "Large; can't restyle or rotate labels"
+       ]
+      },
+      {
+       "title": "Vector tiles",
+       "pros": [
+        "Small, sharp, dynamic styling"
+       ],
+       "cons": [
+        "Client rendering cost"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "Tiles, search, routing, traffic — pick 2 to go deep."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Tiles are cacheable; routing is CPU; pings are a stream."
+      },
+      {
+       "min": "10–20",
+       "title": "HLD",
+       "text": "Three services."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "Tile pyramid; CH routing; traffic pipeline."
+      },
+      {
+       "min": "35–45",
+       "title": "Scale",
+       "text": "Regional graphs, reroute, offline."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How many tiles at zoom 18?",
+       "a": "4^18 ≈ 69 billion — which is why deep zooms are generated on demand and mostly empty ocean is skipped."
+      },
+      {
+       "q": "How does geocoding work?",
+       "a": "Parse the address, look it up in an inverted index of address components, rank candidates by match quality and proximity."
+      },
+      {
+       "q": "Why not just A*?",
+       "a": "A* still explores too many nodes for cross-country routes at interactive latency; preprocessing-based methods answer in milliseconds."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Tiles: (z, x, y) quadtree, vector, CDN.",
+      "Routing: preprocessed hierarchy in memory, regional.",
+      "Traffic: pings → map matching → windowed segment speeds.",
+      "ETA = sum of predicted segment times."
+     ]
+    }
+   ]
+  }
+ ]
+}

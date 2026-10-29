@@ -1,0 +1,407 @@
+{
+ "id": "figma-collaboration",
+ "num": 19,
+ "title": "Figma Live Collaboration",
+ "summary": "Multiplayer design editing: each file is loaded into an authoritative in-memory server process, clients send property-level changes over WebSockets, conflicts resolve last-writer-wins per property, and periodic checkpoints plus a write-ahead journal make it durable.",
+ "tags": [
+  "Multiplayer",
+  "CRDT-ish",
+  "WebSockets",
+  "WASM"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "apis-realtime",
+  "consistency",
+  "patterns",
+  "blob"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Many people edit the same design file live; see cursors, selections and changes instantly"
+      ],
+      [
+       "Functional",
+       "Comments, version history, components shared across files (libraries)"
+      ],
+      [
+       "Functional",
+       "Works in the browser with large files (thousands of layers)"
+      ],
+      [
+       "Non-functional",
+       "Local edits apply instantly; remote edits visible < 100–200 ms"
+      ],
+      [
+       "Non-functional",
+       "All clients converge; no lost work on server crash"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Concurrent files open",
+       "value": "~1M",
+       "sub": "peak"
+      },
+      {
+       "label": "Editors / file",
+       "value": "1–100+",
+       "sub": "plus viewers"
+      },
+      {
+       "label": "File size",
+       "value": "MBs–100s MB",
+       "sub": "scene graph"
+      },
+      {
+       "label": "Changes / s / file",
+       "value": "~10–100",
+       "sub": "drags are throttled"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Per-file traffic is small. The design hinges on choosing a conflict model simpler than text OT, because design documents are trees of objects with properties."
+    }
+   ]
+  },
+  {
+   "id": "model",
+   "title": "Document model",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "A file is a tree of objects (frames, rectangles, text) each with an ID and a map of properties (x, y, fill, parent, index).",
+      "Changes are property-level: `{objectId, property, value}`.",
+      "Ordering among siblings uses fractional indexing (a string between neighbours' positions) so concurrent inserts don't collide.",
+      "Rendering engine is C++ compiled to WebAssembly drawing with WebGL in the browser."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key idea",
+     "text": "Most design conflicts are two people setting the same property of the same object — last-writer-wins per property resolves them predictably, so full text-style OT isn't needed."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Browser clients",
+        "kind": "client",
+        "sub": "WASM + WebGL"
+       }
+      ],
+      [
+       {
+        "label": "WebSocket edge",
+        "kind": "edge"
+       },
+       {
+        "label": "File router",
+        "kind": "service",
+        "sub": "file → multiplayer server"
+       }
+      ],
+      [
+       {
+        "label": "Multiplayer server",
+        "kind": "service",
+        "sub": "file in memory, orders changes"
+       }
+      ],
+      [
+       {
+        "label": "Journal",
+        "kind": "db",
+        "sub": "recent changes, durable"
+       },
+       {
+        "label": "Checkpoint store",
+        "kind": "store",
+        "sub": "S3 snapshots"
+       },
+       {
+        "label": "Metadata DB",
+        "kind": "db",
+        "sub": "files, permissions, comments"
+       }
+      ]
+     ],
+     "caption": "One authoritative multiplayer process per open file"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Opening a file routes all clients to the server process that owns it; that process loads the latest checkpoint + journal.",
+      "Client applies its change locally immediately and sends it.",
+      "Server applies changes in arrival order (LWW per property), acks the sender and broadcasts to others.",
+      "Client keeps unacknowledged local changes on top, so a remote change to the same property doesn't flicker over the user's own pending value.",
+      "Changes are appended to a journal for durability; the server checkpoints the whole file periodically to object storage."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "conflicts",
+   "title": "Deep dive: conflict resolution",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Case",
+      "Resolution"
+     ],
+     "rows": [
+      [
+       "Two users set the same property",
+       "Server order decides; last write wins"
+      ],
+      [
+       "Two users set different properties of one object",
+       "Both apply (no conflict)"
+      ],
+      [
+       "One deletes an object another edits",
+       "Delete wins; edits to a missing object dropped (undo can restore)"
+      ],
+      [
+       "Concurrent reparenting creating a cycle",
+       "Server rejects the move that would create a cycle"
+      ],
+      [
+       "Concurrent sibling inserts",
+       "Fractional index keys keep both, in a deterministic order"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "This is CRDT-inspired but server-authoritative: the central server gives a single order, which keeps the logic simple, while fractional indexing and per-property LWW behave like CRDT registers."
+    }
+   ]
+  },
+  {
+   "id": "durability",
+   "title": "Deep dive: durability and scaling",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Write-ahead journal of changes (Figma moved this into a dedicated store so a server crash loses nothing acknowledged).",
+      "Checkpoints every N seconds/changes to S3; load = checkpoint + replay journal tail.",
+      "Multiplayer servers are stateful: route by file ID; if a server dies, the file reopens on another server from checkpoint + journal and clients reconnect.",
+      "Viewers (read-only) can be served by fan-out replicas so a 'company all-hands' file doesn't overload one process.",
+      "Presence (cursors, selections) is ephemeral, throttled (~30 Hz) and never journaled."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "offline",
+   "title": "Deep dive: reconnects and offline",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Client tracks the last acknowledged sequence; on reconnect it receives changes since then and re-sends unacknowledged local changes.",
+      "Brief offline edits survive and merge by the same LWW rules; long offline sessions may need a full reload.",
+      "Undo is per user: inverse of the user's own changes, applied as new changes."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Multiplayer server crash",
+       "Clients disconnect",
+       "Reload on new server from checkpoint + journal; clients resend pending"
+      ],
+      [
+       "Huge file",
+       "Slow load, memory",
+       "Lazy load pages, incremental checkpoints, binary format"
+      ],
+      [
+       "Hot file (1,000 viewers)",
+       "One process overloaded",
+       "Read-only replica fan-out, throttle presence"
+      ],
+      [
+       "Split ownership",
+       "Divergence",
+       "Lease on file ownership with fencing on journal writes"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Conflict model",
+       "Server-ordered LWW per property",
+       "Peer-to-peer / fully decentralized editing"
+      ],
+      [
+       "Server",
+       "Stateful process per file",
+       "Pure stateless scaling"
+      ],
+      [
+       "Client",
+       "WASM + WebGL renderer",
+       "Simple DOM rendering"
+      ],
+      [
+       "Durability",
+       "Journal + checkpoints",
+       "Single blob save (would lose work)"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Live multiplayer design editing, history, comments."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Instant local, < 200 ms remote, converge."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "1M open files; small per-file rate."
+      },
+      {
+       "min": "12–17",
+       "title": "Model",
+       "text": "Object tree with property maps; fractional indexing."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Router → multiplayer server per file → journal + checkpoints."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Conflicts, durability, reconnect + pending changes."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Hot files, crash recovery, latency metrics."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "Why not OT like Google Docs?",
+       "a": "Design docs aren't linear text; property-level LWW plus tree rules is simpler and covers nearly all real conflicts. Text layers can still use finer merging."
+      },
+      {
+       "q": "How do shared component libraries update?",
+       "a": "Library publishes a version; consuming files get an update notification and pull new component definitions as changes."
+      },
+      {
+       "q": "How is version history built?",
+       "a": "Checkpoints become restorable versions; named versions are pinned checkpoints."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "File = tree of objects with property maps.",
+      "Server-authoritative, last-writer-wins per property.",
+      "Fractional indexing for sibling order.",
+      "Client keeps pending local changes on top until acked.",
+      "Journal + checkpoints for durability.",
+      "Presence ephemeral and throttled."
+     ]
+    }
+   ]
+  }
+ ]
+}

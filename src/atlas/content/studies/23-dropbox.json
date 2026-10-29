@@ -1,0 +1,433 @@
+{
+ "id": "dropbox",
+ "num": 23,
+ "title": "Dropbox / Google Drive",
+ "summary": "File sync across devices: content-defined chunking, a block store addressed by hash, a metadata journal per namespace, and a notification channel that tells clients when to pull.",
+ "tags": [
+  "Chunking",
+  "Dedup",
+  "Sync",
+  "Metadata"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "blob",
+  "databases",
+  "apis-realtime",
+  "consistency",
+  "cdn"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Upload, download and delete files; folders; share with users / links"
+      ],
+      [
+       "Functional",
+       "Automatic sync across a user's devices, including offline edits"
+      ],
+      [
+       "Functional",
+       "File version history and restore"
+      ],
+      [
+       "Non-functional",
+       "Never lose or corrupt a committed file (durability ≫ availability)"
+      ],
+      [
+       "Non-functional",
+       "Sync latency of a few seconds for small changes"
+      ],
+      [
+       "Non-functional",
+       "Efficient for large files: only changed parts are transferred"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Clarify the file-size ceiling (say 50 GB), whether real-time co-editing is in scope (it usually isn't — that's Google Docs), and whether conflicts should be merged or kept side by side."
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Users",
+       "value": "500M",
+       "sub": "~100M DAU"
+      },
+      {
+       "label": "Files / user",
+       "value": "~1,000",
+       "sub": "avg 1 MB"
+      },
+      {
+       "label": "Storage",
+       "value": "~500 PB",
+       "sub": "before dedup"
+      },
+      {
+       "label": "Writes",
+       "value": "~30k/s",
+       "sub": "block uploads at peak"
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Most traffic is metadata polling and small edits; bulk bandwidth goes straight to the block store, so keep it off the API servers."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /files/upload-session          {path, size, block_hashes[]} -> {missing_hashes[], session_id}\nPUT  /blocks/{hash}                 body = block bytes (presigned URL to the block store)\nPOST /files/commit                  {session_id, path, block_hashes[], parent_rev} -> {rev}\nGET  /files/list_folder/continue    {cursor} -> {entries[], cursor, has_more}\nGET  /files/longpoll                {cursor} -> {changes: bool}   (held open ~60 s)\nGET  /files/download                {path, rev} -> block_hashes[] + presigned block URLs"
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "The client sends the **list of block hashes first**; the server answers with only the hashes it doesn't already have. Unchanged blocks — and blocks any other user already uploaded — are never re-sent."
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Table",
+      "Key",
+      "Fields"
+     ],
+     "rows": [
+      [
+       "files (journal)",
+       "(namespace_id, journal_id)",
+       "path, rev, block_hashes[], size, modified_by, deleted"
+      ],
+      [
+       "latest_file",
+       "(namespace_id, path)",
+       "current rev, block list — derived from the journal"
+      ],
+      [
+       "blocks",
+       "sha256(block)",
+       "storage location, refcount, size"
+      ],
+      [
+       "namespaces",
+       "namespace_id",
+       "owner, members/ACLs (a shared folder is its own namespace)"
+      ],
+      [
+       "cursors",
+       "(device_id, namespace_id)",
+       "last journal_id seen"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Every change appends to a per-namespace **journal** with a monotonically increasing id. A device's sync state is just a cursor into that journal — the same idea as a Kafka offset."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Desktop / mobile client",
+        "kind": "client",
+        "sub": "watcher + chunker + local DB"
+       }
+      ],
+      [
+       {
+        "label": "API gateway",
+        "kind": "edge"
+       },
+       {
+        "label": "Notification service",
+        "kind": "service",
+        "sub": "long-poll / WebSocket"
+       }
+      ],
+      [
+       {
+        "label": "Metadata service",
+        "kind": "service",
+        "sub": "commit, list, ACL"
+       },
+       {
+        "label": "Block service",
+        "kind": "service",
+        "sub": "presigned URLs"
+       }
+      ],
+      [
+       {
+        "label": "Metadata DB",
+        "kind": "db",
+        "sub": "sharded by namespace"
+       },
+       {
+        "label": "Block store",
+        "kind": "store",
+        "sub": "S3-like, content-addressed"
+       },
+       {
+        "label": "Change log",
+        "kind": "queue"
+       }
+      ]
+     ],
+     "caption": "Metadata and bytes travel separately"
+    },
+    {
+     "t": "list",
+     "items": [
+      "**Upload:** chunk → hash → ask which hashes are missing → PUT the missing blocks directly to the block store → commit the new block list with the parent revision.",
+      "**Commit** appends a journal entry in a transaction; the change log fans out to the notification service.",
+      "**Other devices** hold a long-poll; when told something changed they call list_folder/continue with their cursor, then fetch only missing blocks."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "deep-chunking",
+   "title": "Deep dive: chunking and dedup",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Fixed-size blocks (e.g. 4 MB)",
+       "pros": [
+        "Simple, fast",
+        "Dropbox historically used 4 MB blocks"
+       ],
+       "cons": [
+        "Inserting one byte at the start shifts every boundary — every block changes"
+       ]
+      },
+      {
+       "title": "Content-defined chunking (rolling hash)",
+       "pros": [
+        "Boundaries follow content, so an insert only changes nearby chunks",
+        "Better dedup across versions"
+       ],
+       "cons": [
+        "CPU cost; variable chunk sizes complicate storage"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Hash each chunk with SHA-256: the hash is both the dedup key and an integrity check on download.",
+      "Dedup across users saves a lot of storage, but leaks information (\"does anyone already have this file?\") — scope dedup per user or per namespace if that matters.",
+      "Compress chunks client-side before upload; optionally encrypt (then cross-user dedup is impossible unless you use convergent encryption)."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "deep-sync",
+   "title": "Deep dive: sync, conflicts and offline",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Detect",
+       "text": "File watcher (inotify / FSEvents) marks paths dirty; a local SQLite DB stores the last-synced block list per file."
+      },
+      {
+       "title": "Upload",
+       "text": "Commit carries the parent rev. If the server's latest rev ≠ parent, it's a conflict."
+      },
+      {
+       "title": "Resolve",
+       "text": "Don't merge binary files: keep both — save the loser as \"file (conflicted copy, laptop).docx\"."
+      },
+      {
+       "title": "Download",
+       "text": "Apply remote changes atomically: write to a temp file, then rename."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Using wall-clock timestamps to decide which edit wins. Clocks skew; use the server-assigned journal order plus parent revisions (optimistic concurrency)."
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Shard metadata by **namespace id** so a folder's journal is ordered within one shard; very large shared namespaces are the hot spots.",
+      "Block store: replicate or erasure-code across zones; blocks are immutable, which makes caching and CDN delivery trivial.",
+      "Garbage collection: decrement refcounts when versions expire; delete blocks only after a grace period (a crashed upload may still reference them).",
+      "Notification fan-out: a user may have 5 devices; send \"something changed\" not the change itself — clients pull.",
+      "Thundering herd after an outage: jitter client reconnects and long-poll timeouts."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Long-polling",
+       "pros": [
+        "Works through proxies and firewalls",
+        "Simple server"
+       ],
+       "cons": [
+        "One held request per device"
+       ]
+      },
+      {
+       "title": "WebSockets",
+       "pros": [
+        "Lower latency, bidirectional"
+       ],
+       "cons": [
+        "Stateful connections; harder to load balance"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Bytes and metadata take different paths: bytes go straight to an immutable, content-addressed block store; metadata is a per-namespace journal that devices follow with a cursor."
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "Sync, versions, sharing; no co-editing; file size limit."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Users, storage, write rate; metadata vs bytes."
+      },
+      {
+       "min": "10–20",
+       "title": "API + HLD",
+       "text": "Upload session with block hashes, commit with parent rev, long-poll."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "Chunking + dedup, journal + cursors, conflicts."
+      },
+      {
+       "min": "35–45",
+       "title": "Scale",
+       "text": "Shard by namespace, GC, notification fan-out."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you resume a 10 GB upload after a network drop?",
+       "a": "Blocks are independently addressed: the client re-asks which hashes are missing and only uploads those."
+      },
+      {
+       "q": "How do shared folders work?",
+       "a": "A shared folder is a separate namespace mounted into each member's tree; ACLs live on the namespace."
+      },
+      {
+       "q": "How would you support LAN sync?",
+       "a": "Clients on the same network discover each other and fetch blocks peer-to-peer by hash, verifying each hash."
+      },
+      {
+       "q": "Delete vs restore?",
+       "a": "Deletes are journal entries; blocks stay referenced by old versions until retention expires."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Chunk + hash; ask the server which hashes are missing.",
+      "Bytes → presigned URLs → block store. Metadata → sharded DB.",
+      "Per-namespace journal + device cursor = sync state.",
+      "Commit with parent rev; conflicts produce a conflicted copy.",
+      "Notify, then pull. Never push the full change list."
+     ]
+    }
+   ]
+  }
+ ]
+}

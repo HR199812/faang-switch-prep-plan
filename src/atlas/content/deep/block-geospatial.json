@@ -1,0 +1,212 @@
+{
+ "minutes": 14,
+ "sections": [
+  {
+   "id": "problem",
+   "title": "Why \"find nearby\" is hard for a normal index",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "A B-tree indexes one dimension. A query like \"restaurants within 2 km\" has two (latitude and longitude); an index on latitude alone returns a huge horizontal band of the planet that must then be filtered by longitude. Geospatial indexes map 2-D space onto structures that keep nearby points near each other in the index."
+    }
+   ]
+  },
+  {
+   "id": "geohash",
+   "title": "Geohash",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Geohash recursively halves the world: the first bit says east/west of the prime meridian, the next north/south of the equator, and so on, interleaving longitude and latitude bits. Groups of 5 bits become base-32 characters. Points that share a longer prefix are (usually) closer together, so \"nearby\" becomes a **prefix query** on an ordinary string index."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Precision (chars)",
+      "Cell size (approx.)"
+     ],
+     "rows": [
+      [
+       "4",
+       "39 km × 20 km"
+      ],
+      [
+       "5",
+       "4.9 km × 4.9 km"
+      ],
+      [
+       "6",
+       "1.2 km × 0.6 km"
+      ],
+      [
+       "7",
+       "153 m × 153 m"
+      ],
+      [
+       "8",
+       "38 m × 19 m"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Querying only the user's own cell. A point just across a cell boundary is close but has a completely different prefix — always include the 8 neighbouring cells, then filter by real distance."
+    }
+   ]
+  },
+  {
+   "id": "quadtree",
+   "title": "Quadtree",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "A quadtree splits a region into four quadrants, and keeps splitting any quadrant holding more than N points (e.g. 100). Dense cities get small cells and the ocean stays one big cell, so each leaf holds a similar number of points. Search walks down to the leaf containing the user and expands to neighbouring leaves until it has enough results. Quadtrees usually live in memory and are rebuilt periodically."
+    },
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Geohash",
+       "pros": [
+        "Works in any DB/KV store with string prefixes",
+        "Easy sharding by prefix"
+       ],
+       "cons": [
+        "Fixed cells regardless of density; boundary effects"
+       ]
+      },
+      {
+       "title": "Quadtree",
+       "pros": [
+        "Adapts to density",
+        "Natural k-nearest search"
+       ],
+       "cons": [
+        "In-memory structure to build and keep updated"
+       ]
+      },
+      {
+       "title": "S2 / H3 cells",
+       "pros": [
+        "Better shapes (H3 hexagons have uniform neighbour distances)",
+        "Used by Google (S2) and Uber (H3)"
+       ],
+       "cons": [
+        "Extra library and concepts"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "query",
+   "title": "Query flow for a nearby search",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Client",
+      "Location service",
+      "Geo index",
+      "Details cache"
+     ],
+     "steps": [
+      {
+       "from": "Client",
+       "to": "Location service",
+       "label": "nearby(lat, lng, 2 km)"
+      },
+      {
+       "from": "Location service",
+       "to": "Location service",
+       "label": "cell = geohash(lat,lng,5) + 8 neighbours"
+      },
+      {
+       "from": "Location service",
+       "to": "Geo index",
+       "label": "ids in 9 cells"
+      },
+      {
+       "from": "Geo index",
+       "to": "Location service",
+       "label": "~600 candidates",
+       "dashed": true
+      },
+      {
+       "from": "Location service",
+       "to": "Location service",
+       "label": "haversine filter + rank → top 20"
+      },
+      {
+       "from": "Location service",
+       "to": "Details cache",
+       "label": "multi-get 20 ids"
+      },
+      {
+       "from": "Location service",
+       "to": "Client",
+       "label": "results",
+       "dashed": true
+      }
+     ],
+     "caption": "Radius search with geohash"
+    }
+   ]
+  },
+  {
+   "id": "moving",
+   "title": "Moving objects (drivers, couriers)",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Drivers send locations every ~4 seconds: the index is **write-heavy**, so keep it in memory (Redis GEO, or an in-memory grid per city) rather than rebuilding a tree.",
+      "Update = remove from the old cell, add to the new one; expire entries that stop reporting.",
+      "Shard by city / region; matching runs against the current cell and its neighbours.",
+      "Persist location history asynchronously to a stream / time-series store."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tools",
+   "title": "Off-the-shelf options",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Tool",
+      "Notes"
+     ],
+     "rows": [
+      [
+       "PostGIS",
+       "Full GIS in Postgres: GiST indexes, ST_DWithin, polygons"
+      ],
+      [
+       "Redis GEO",
+       "GEOADD / GEOSEARCH on a geohash-scored sorted set"
+      ],
+      [
+       "Elasticsearch",
+       "geo_point + geo_distance filter combined with text search"
+      ],
+      [
+       "MongoDB",
+       "2dsphere indexes"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "For static places I'd use geohash cells plus neighbours in a read-replicated index; for drivers that move every few seconds I'd keep an in-memory grid per city in Redis and update it on every ping."
+    }
+   ]
+  }
+ ]
+}

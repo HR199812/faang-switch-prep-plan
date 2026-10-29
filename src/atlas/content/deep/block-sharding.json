@@ -1,0 +1,245 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "why",
+   "title": "When and why to shard",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Sharding (horizontal partitioning) splits a dataset across multiple independent databases, each holding a subset of rows. You shard when a single primary can't handle the **write throughput** or the **data volume** — replicas only help reads. Each shard is usually itself replicated."
+    },
+    {
+     "t": "p",
+     "text": "The price is real: cross-shard queries, joins and transactions become hard, rebalancing is operationally risky, and a bad shard key creates hot spots that defeat the whole point."
+    }
+   ]
+  },
+  {
+   "id": "key",
+   "title": "Choosing the shard key",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Good shard key property",
+      "Why"
+     ],
+     "rows": [
+      [
+       "High cardinality",
+       "Enough distinct values to spread across many shards"
+      ],
+      [
+       "Even access distribution",
+       "No single value gets a disproportionate share of traffic"
+      ],
+      [
+       "Matches the dominant query",
+       "Most queries hit one shard (e.g. all of a user's data on one shard)"
+      ],
+      [
+       "Stable",
+       "Changing a row's key means moving it between shards"
+      ]
+     ]
+    },
+    {
+     "t": "table",
+     "head": [
+      "System",
+      "Natural shard key"
+     ],
+     "rows": [
+      [
+       "Chat",
+       "channel_id (messages of a channel together)"
+      ],
+      [
+       "E-commerce orders",
+       "customer_id (a customer's orders together)"
+      ],
+      [
+       "Multi-tenant SaaS",
+       "tenant_id"
+      ],
+      [
+       "Time-series metrics",
+       "series id (hash) — not timestamp"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Sharding by timestamp or an auto-increment id with range partitioning: all new writes go to the last shard."
+    }
+   ]
+  },
+  {
+   "id": "strategies",
+   "title": "Partitioning strategies",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Range",
+       "pros": [
+        "Efficient range scans",
+        "Easy to reason about"
+       ],
+       "cons": [
+        "Hot spots on sequential keys",
+        "Needs splitting as ranges grow"
+       ]
+      },
+      {
+       "title": "Hash (mod N)",
+       "pros": [
+        "Even distribution"
+       ],
+       "cons": [
+        "Changing N reshuffles almost every key",
+        "No range scans"
+       ]
+      },
+      {
+       "title": "Consistent hashing",
+       "pros": [
+        "Adding a node moves ~1/N of keys",
+        "Virtual nodes smooth load"
+       ],
+       "cons": [
+        "Still no range scans; more complex"
+       ]
+      },
+      {
+       "title": "Directory / lookup table",
+       "pros": [
+        "Any mapping you like; move tenants individually"
+       ],
+       "cons": [
+        "Lookup service is a dependency and must be cached"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "consistent-hashing",
+   "title": "Consistent hashing, visually",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Hash both nodes and keys onto a ring of 2^32 positions. A key belongs to the first node clockwise from it. When a node joins, it takes over only the keys between it and its predecessor; when it leaves, only its keys move to the next node. Giving each physical node many **virtual nodes** spreads its share around the ring so load stays even."
+    },
+    {
+     "t": "ring"
+    }
+   ]
+  },
+  {
+   "id": "routing",
+   "title": "Routing a query to the right shard",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "App with shard-aware client",
+        "kind": "client",
+        "sub": "computes shard itself"
+       }
+      ],
+      [
+       {
+        "label": "Proxy / router",
+        "kind": "edge",
+        "sub": "Vitess, ProxySQL, mongos"
+       },
+       {
+        "label": "Shard map",
+        "kind": "db",
+        "sub": "key range → shard"
+       }
+      ],
+      [
+       {
+        "label": "Shard 1",
+        "kind": "db"
+       },
+       {
+        "label": "Shard 2",
+        "kind": "db"
+       },
+       {
+        "label": "Shard 3",
+        "kind": "db"
+       }
+      ]
+     ],
+     "caption": "Three common routing designs"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Single-shard queries (include the shard key) are fast and scale linearly.",
+      "Scatter-gather queries (no shard key) hit every shard and are as slow as the slowest — avoid them on hot paths, or maintain a secondary index / search index."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cross",
+   "title": "Cross-shard operations",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Joins:** denormalise, or co-locate related data on the same shard by sharing the shard key.",
+      "**Transactions:** avoid cross-shard transactions; use sagas, or a database with distributed transactions (Spanner, CockroachDB) when you must.",
+      "**Global secondary indexes:** a separate index table sharded by the indexed value (DynamoDB GSIs) — updated asynchronously.",
+      "**Unique constraints:** enforce on the shard key, or via a separate uniqueness table."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "rebalance",
+   "title": "Resharding and hot spots",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Pre-split",
+       "text": "Start with many logical shards (e.g. 4,096) mapped onto a few physical servers; move logical shards later."
+      },
+      {
+       "title": "Copy",
+       "text": "Stream the moving shard to the new host (snapshot + replication log)."
+      },
+      {
+       "title": "Cut over",
+       "text": "Briefly pause writes to the shard, catch up, flip the routing map."
+      },
+      {
+       "title": "Clean up",
+       "text": "Delete the old copy after verification."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd shard by user_id with consistent hashing over many virtual shards, so most queries are single-shard and adding capacity only moves a fraction of the data. Hot celebrity keys get special handling — caching or splitting."
+    }
+   ]
+  }
+ ]
+}

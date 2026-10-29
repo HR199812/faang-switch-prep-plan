@@ -1,0 +1,426 @@
+{
+ "id": "vs-code",
+ "num": 18,
+ "title": "VS Code",
+ "summary": "A desktop editor built on Electron with a multi-process architecture: the UI renderer stays responsive while extensions run in a separate extension host, language intelligence comes from out-of-process language servers (LSP), and remote development splits the editor from the machine that runs the code.",
+ "tags": [
+  "Process isolation",
+  "LSP",
+  "Extensions",
+  "Remote dev"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "apis-realtime",
+  "resilience",
+  "search",
+  "ops-security"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Open folders, edit files, search across files, integrated terminal, debugging, Git"
+      ],
+      [
+       "Functional",
+       "Language features for hundreds of languages: completion, go-to-definition, diagnostics"
+      ],
+      [
+       "Functional",
+       "Third-party extensions from a marketplace; settings sync"
+      ],
+      [
+       "Functional",
+       "Remote development (SSH, containers, WSL, Codespaces in the browser)"
+      ],
+      [
+       "Non-functional",
+       "Typing latency < 16 ms (one frame); startup in ~1–2 s"
+      ],
+      [
+       "Non-functional",
+       "A misbehaving extension must not freeze or crash the editor"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Extensions",
+       "value": "60k+",
+       "sub": "marketplace"
+      },
+      {
+       "label": "Installed per user",
+       "value": "~20–50",
+       "sub": ""
+      },
+      {
+       "label": "Large repo",
+       "value": "1M+ files",
+       "sub": "search must stream"
+      },
+      {
+       "label": "Frame budget",
+       "value": "16 ms",
+       "sub": "at 60 fps"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "This is a client architecture problem: the constraints are latency per keystroke and isolation from untrusted third-party code, not server QPS."
+    }
+   ]
+  },
+  {
+   "id": "architecture",
+   "title": "Process architecture",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Process",
+      "Runs",
+      "Why separate"
+     ],
+     "rows": [
+      [
+       "Main (Electron)",
+       "Window management, menus, lifecycle, updates",
+       "Native OS integration"
+      ],
+      [
+       "Renderer (workbench UI)",
+       "Editor (Monaco), views, keybindings",
+       "Must stay responsive"
+      ],
+      [
+       "Extension host (Node.js)",
+       "All extensions' JavaScript",
+       "Isolate untrusted/slow code from UI"
+      ],
+      [
+       "Language servers",
+       "One process per language (TS server, Pyright, rust-analyzer)",
+       "Heavy analysis, any language"
+      ],
+      [
+       "Shared / utility processes",
+       "File watching, search (ripgrep), terminal (node-pty)",
+       "CPU-heavy or native work off the UI"
+      ]
+     ]
+    },
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Renderer UI",
+        "kind": "client",
+        "sub": "Monaco editor"
+       }
+      ],
+      [
+       {
+        "label": "Main process",
+        "kind": "service"
+       },
+       {
+        "label": "Extension host",
+        "kind": "service",
+        "sub": "Node.js"
+       },
+       {
+        "label": "Search / file watcher",
+        "kind": "service",
+        "sub": "ripgrep"
+       }
+      ],
+      [
+       {
+        "label": "Language servers",
+        "kind": "service",
+        "sub": "LSP over stdio/JSON-RPC"
+       },
+       {
+        "label": "Debug adapters",
+        "kind": "service",
+        "sub": "DAP"
+       }
+      ],
+      [
+       {
+        "label": "File system",
+        "kind": "store",
+        "sub": "local or remote"
+       }
+      ]
+     ],
+     "caption": "UI talks to everything over IPC/RPC; nothing heavy runs in the renderer"
+    }
+   ]
+  },
+  {
+   "id": "lsp",
+   "title": "Deep dive: Language Server Protocol",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "LSP is JSON-RPC between an editor (client) and a language server: `textDocument/didOpen`, `didChange` (incremental edits), `completion`, `definition`, `hover`, `publishDiagnostics`.",
+      "M editors × N languages becomes M + N implementations.",
+      "Servers keep an in-memory model of the workspace (syntax trees, symbol index) and update incrementally on each change.",
+      "Requests are cancellable (`$/cancelRequest`) so stale completions from old keystrokes are dropped.",
+      "Debug Adapter Protocol (DAP) does the same for debuggers."
+     ]
+    },
+    {
+     "t": "code",
+     "lang": "json",
+     "text": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/completion\",\n \"params\":{\"textDocument\":{\"uri\":\"file:///src/app.ts\"},\"position\":{\"line\":41,\"character\":12}}}"
+    }
+   ]
+  },
+  {
+   "id": "editor",
+   "title": "Deep dive: the editor core",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Text buffer: a piece tree (VS Code's variant of a piece table) — edits are O(log n) without copying the whole file; handles 100 MB+ files.",
+      "Virtualized rendering: only visible lines are in the DOM.",
+      "Syntax highlighting with TextMate grammars tokenized incrementally, plus semantic tokens from language servers.",
+      "Undo/redo stores edit operations, not snapshots."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "extensions",
+   "title": "Deep dive: extension model",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Extensions declare **activation events** (onLanguage:python, onCommand) so they load lazily — key to fast startup.",
+      "They can't touch the DOM; they use the `vscode` API (commands, providers, webviews) proxied over RPC to the renderer.",
+      "Extension host crash → UI shows a message and restarts it; editing continues.",
+      "Webviews run in sandboxed iframes with CSP for custom UI.",
+      "Workspace Trust: restricted mode for untrusted folders disables code-executing features."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "remote",
+   "title": "Deep dive: remote development",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Split: UI runs locally (or in the browser); a **VS Code Server** runs on the remote machine with the extension host, language servers, terminal and file system.",
+      "Communication over a single authenticated channel (SSH tunnel / WebSocket); latency-sensitive UI stays local.",
+      "Extensions are classified as UI or workspace extensions and run where they belong.",
+      "Codespaces = the same server inside a cloud container; github.dev runs a web-only version with a virtual file system."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "search-sync",
+   "title": "Deep dive: search and settings sync",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Workspace search shells out to ripgrep, streaming results so the first matches appear instantly; respects .gitignore.",
+      "Quick Open uses a fuzzy file index kept up to date by the file watcher.",
+      "Settings Sync stores settings, keybindings, extensions and snippets in a cloud service per account, merged with conflict detection."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Extension infinite loop",
+       "Features stall",
+       "Separate extension host; unresponsive-host detection and profiling"
+      ],
+      [
+       "Language server crash",
+       "No IntelliSense",
+       "Client restarts it with backoff"
+      ],
+      [
+       "Huge file / repo",
+       "Slow UI",
+       "Piece tree, virtualization, disable tokenization for giant files, streaming search"
+      ],
+      [
+       "Malicious extension",
+       "Code execution",
+       "Marketplace scanning, publisher verification, Workspace Trust"
+      ],
+      [
+       "Remote connection drop",
+       "Session lost",
+       "Reconnect with server kept alive; state on server"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Platform",
+       "Electron (web tech)",
+       "Native memory footprint"
+      ],
+      [
+       "Extensions",
+       "Separate process + RPC API",
+       "Direct DOM access for extensions"
+      ],
+      [
+       "Language support",
+       "LSP out-of-process",
+       "Tight in-process integration speed"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Edit, search, extensions, languages, remote."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "16 ms typing, isolation, fast startup."
+      },
+      {
+       "min": "8–12",
+       "title": "Sizing",
+       "text": "Extensions count, repo size."
+      },
+      {
+       "min": "12–17",
+       "title": "Architecture",
+       "text": "Main, renderer, extension host, language servers."
+      },
+      {
+       "min": "17–27",
+       "title": "Data flow",
+       "text": "Keystroke → buffer → LSP didChange → diagnostics."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "LSP, extension isolation + lazy activation, remote split."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Crash recovery, security of extensions."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How would you add real-time pair programming (Live Share)?",
+       "a": "A relay service shares the host's workspace: edits as OT/CRDT ops, cursors as presence, language features proxied from the host."
+      },
+      {
+       "q": "How do you keep startup fast with 50 extensions?",
+       "a": "Lazy activation events, cached extension manifests, V8 code cache, deferring non-critical work after first paint."
+      },
+      {
+       "q": "How would you build Copilot-style completions?",
+       "a": "Extension collects context (open files, cursor), calls an LLM service with debouncing and cancellation, shows ghost text; caching and rate limits server-side."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Multi-process: renderer UI, extension host, language servers.",
+      "LSP: JSON-RPC, incremental didChange, cancellable requests.",
+      "Piece tree buffer + virtualized rendering.",
+      "Lazy activation keeps startup fast.",
+      "Remote: UI local, server + extensions remote.",
+      "ripgrep streaming search."
+     ]
+    }
+   ]
+  }
+ ]
+}

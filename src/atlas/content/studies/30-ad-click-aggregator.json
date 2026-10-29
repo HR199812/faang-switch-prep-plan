@@ -1,0 +1,315 @@
+{
+ "id": "ad-click-aggregator",
+ "num": 30,
+ "title": "Ad Click Aggregator",
+ "summary": "Count billions of ad clicks per day for billing and dashboards: fast redirect, an append-only click stream, windowed aggregation with exactly-once semantics, dedup and fraud filtering, and an OLAP store for queries.",
+ "tags": [
+  "Streaming",
+  "Windows",
+  "Exactly-once",
+  "OLAP"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "stream-processing",
+  "queues-kafka",
+  "probabilistic",
+  "databases",
+  "storage-engines"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Users click an ad and are redirected to the advertiser's site"
+      ],
+      [
+       "Functional",
+       "Advertisers query click counts per ad over time (minute granularity), filtered by dimensions"
+      ],
+      [
+       "Non-functional",
+       "Counts must be accurate — they drive billing"
+      ],
+      [
+       "Non-functional",
+       "Queries over recent data within ~1 minute of the click; sub-second dashboard queries"
+      ],
+      [
+       "Non-functional",
+       "Peak ~10k+ clicks/s; no data loss"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Clicks",
+       "value": "~1B / day",
+       "sub": "~12k/s avg"
+      },
+      {
+       "label": "Peak",
+       "value": "~50k/s"
+      },
+      {
+       "label": "Event size",
+       "value": "~200 B",
+       "sub": "~200 GB/day raw"
+      },
+      {
+       "label": "Ads",
+       "value": "~10M active"
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Write volume is high, query patterns are known in advance (ad × minute × dimensions) — pre-aggregate."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Browser",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Click service",
+        "kind": "edge",
+        "sub": "log + 302 redirect"
+       }
+      ],
+      [
+       {
+        "label": "Kafka (clicks)",
+        "kind": "queue",
+        "sub": "partitioned by ad_id"
+       }
+      ],
+      [
+       {
+        "label": "Stream processor",
+        "kind": "service",
+        "sub": "Flink, 1-min tumbling windows"
+       },
+       {
+        "label": "Raw click lake",
+        "kind": "store",
+        "sub": "S3 / Parquet"
+       }
+      ],
+      [
+       {
+        "label": "OLAP store",
+        "kind": "db",
+        "sub": "ClickHouse / Druid / Pinot"
+       },
+       {
+        "label": "Batch job",
+        "kind": "service",
+        "sub": "hourly/daily recompute"
+       }
+      ],
+      [
+       {
+        "label": "Query service",
+        "kind": "service",
+        "sub": "dashboards, billing"
+       }
+      ]
+     ],
+     "caption": "Lambda-ish: fast stream path + batch reconciliation"
+    }
+   ]
+  },
+  {
+   "id": "deep-stream",
+   "title": "Deep dive: windowed aggregation",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Key the stream by ad_id; 1-minute **tumbling windows** on **event time**, not processing time.",
+      "**Watermarks** decide when a window is complete; allow a small lateness and route very late events to a side output reconciled by the batch job.",
+      "**Exactly-once:** Flink checkpoints state and offsets together and writes results with a two-phase-commit or idempotent upsert keyed by (ad_id, minute).",
+      "Hot ads: pre-aggregate per partition then combine, or salt the key (ad_id#n) and merge."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Because results are keyed by (ad_id, window_start), the sink write is an idempotent upsert — replays after a failure overwrite instead of double counting."
+    }
+   ]
+  },
+  {
+   "id": "deep-dedup",
+   "title": "Deep dive: dedup and fraud",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Each impression gets a signed impression id; the click carries it. Dedup clicks on (impression_id) within a window using keyed state with TTL.",
+      "Bot filtering: IP / user-agent heuristics, click rate per user, ML scoring — flag rather than drop so billing can be adjusted.",
+      "Approximate unique users per ad: HyperLogLog sketches merged across windows."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Click service is stateless; it writes to Kafka (acks=all) before redirecting — or redirects immediately and logs async if latency matters more.",
+      "Kafka partitions by ad_id; enough partitions for peak throughput.",
+      "OLAP store with rollups by minute → hour → day; keep raw data in the lake for audits and recompute.",
+      "Batch reconciliation compares stream totals with the raw lake and corrects the serving table."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Stream only (Kappa)",
+       "pros": [
+        "One code path",
+        "Reprocess by replaying Kafka"
+       ],
+       "cons": [
+        "Replays of long history are slow; needs long retention"
+       ]
+      },
+      {
+       "title": "Stream + batch (Lambda)",
+       "pros": [
+        "Batch gives an authoritative billing number"
+       ],
+       "cons": [
+        "Two code paths to keep in sync"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Aggregate on event time in one-minute windows, keyed by ad, with idempotent upserts — and keep the raw log so billing can always be recomputed."
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "Redirect + aggregated queries; accuracy needs."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Clicks/s, storage."
+      },
+      {
+       "min": "10–20",
+       "title": "HLD",
+       "text": "Click service → Kafka → Flink → OLAP; raw lake."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "Windows, watermarks, exactly-once, dedup."
+      },
+      {
+       "min": "35–45",
+       "title": "Scale",
+       "text": "Hot keys, rollups, reconciliation."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How would you compute top-100 ads in the last hour?",
+       "a": "Per-minute counts per ad → sliding 60-minute sum → per-partition top-K heaps merged; or Count-Min sketch + heap for approximate."
+      },
+      {
+       "q": "Why not increment a counter in Redis per click?",
+       "a": "Works for small scale, but gives no event-time windows, no replay, and a lost Redis node loses counts."
+      },
+      {
+       "q": "How do you query arbitrary dimensions?",
+       "a": "Store per-minute aggregates with dimension columns in a columnar OLAP store; it scans/filters quickly."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Log to Kafka, 302 redirect.",
+      "Event-time tumbling windows + watermarks.",
+      "Exactly-once = checkpoints + idempotent upsert by (ad, minute).",
+      "Dedup by impression id; HLL for uniques.",
+      "Raw lake + batch recompute for billing."
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,400 @@
+{
+ "id": "spotify",
+ "num": 14,
+ "title": "Spotify",
+ "summary": "Music streaming: audio files encoded at several bitrates and served in chunks from CDNs, metadata and playlists from sharded services, offline downloads, and an event pipeline that feeds royalties and recommendations.",
+ "tags": [
+  "Streaming",
+  "CDN",
+  "Recommendations",
+  "Events"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "cdn",
+  "blob",
+  "queues-kafka",
+  "caching",
+  "search"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Search and play tracks; playlists; library; offline downloads"
+      ],
+      [
+       "Functional",
+       "Personalized home, Discover Weekly-style recommendations"
+      ],
+      [
+       "Functional",
+       "Accurate play counts for royalties"
+      ],
+      [
+       "Non-functional",
+       "Playback starts < 300 ms; no stutter on flaky mobile networks"
+      ],
+      [
+       "Non-functional",
+       "~600M users; 100M+ tracks"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Concurrent streams",
+       "value": "~30M",
+       "sub": "peak"
+      },
+      {
+       "label": "Bitrate",
+       "value": "96–320 kbps",
+       "sub": "Ogg Vorbis / AAC"
+      },
+      {
+       "label": "Egress",
+       "value": "~5 Tbps",
+       "sub": "30M × ~160 kbps"
+      },
+      {
+       "label": "Catalog",
+       "value": "~100M tracks",
+       "sub": "× several encodings"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Five terabits a second of audio has to come from CDNs; our own servers handle metadata, auth and the event pipeline."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "GET  /v1/tracks/{id}                -> metadata + available formats\nGET  /v1/tracks/{id}/stream?quality -> signed CDN URLs for file chunks (+ decryption key)\nGET  /v1/me/playlists  /  PUT /v1/playlists/{id}/tracks\nPOST /v1/events  [ {type: play_started|progress|play_ended, trackId, ms, ts} ]  (batched)"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Data",
+      "Key",
+      "Store"
+     ],
+     "rows": [
+      [
+       "Tracks / albums / artists",
+       "IDs",
+       "Cassandra + caches (read-heavy metadata)"
+      ],
+      [
+       "Playlists",
+       "playlist_id → ordered items + revision",
+       "Sharded store with version history (collaborative edits)"
+      ],
+      [
+       "Audio files",
+       "track_id + encoding",
+       "Object storage → CDN; encrypted"
+      ],
+      [
+       "Play events",
+       "time-partitioned",
+       "Pub/Sub → data warehouse (BigQuery at Spotify)"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Client",
+        "kind": "client",
+        "sub": "buffer + cache"
+       }
+      ],
+      [
+       {
+        "label": "API gateway",
+        "kind": "edge"
+       },
+       {
+        "label": "CDN",
+        "kind": "edge",
+        "sub": "audio chunks"
+       }
+      ],
+      [
+       {
+        "label": "Metadata / playlist services",
+        "kind": "service"
+       },
+       {
+        "label": "Playback service",
+        "kind": "service",
+        "sub": "signed URLs, keys"
+       }
+      ],
+      [
+       {
+        "label": "Event ingest",
+        "kind": "queue",
+        "sub": "Pub/Sub / Kafka"
+       },
+       {
+        "label": "Object storage",
+        "kind": "store",
+        "sub": "encoded audio"
+       }
+      ],
+      [
+       {
+        "label": "Warehouse + ML",
+        "kind": "db",
+        "sub": "royalties, recs"
+       }
+      ]
+     ],
+     "caption": "Bytes from the CDN, everything else from services"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Play → playback service checks entitlement, returns signed CDN URLs and a decryption key.",
+      "Client fetches the first chunk at low bitrate for fast start, then adapts up.",
+      "Client prefetches the next track near the end of the current one.",
+      "Playback events batch to the event pipeline (play counts after 30 s of listening)."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "delivery",
+   "title": "Deep dive: fast start and smooth playback",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Encode each track at multiple bitrates; split into chunks so the client can switch quality mid-track.",
+      "Start with a small low-bitrate chunk, raise quality as the buffer fills (adaptive bitrate).",
+      "Local cache on device holds recently played tracks; offline downloads store encrypted files with a license that must be refreshed (e.g. every 30 days).",
+      "Long tail: popular tracks are hot in every CDN; rare tracks are fetched from origin/shield on demand."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Most plays are popular tracks that the CDN already has, and the next track is prefetched, so the perceived start time is usually zero."
+    }
+   ]
+  },
+  {
+   "id": "events",
+   "title": "Deep dive: play events, royalties and recommendations",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Billions of events/day; clients batch and retry, so ingestion must dedupe by event ID.",
+      "Royalties need exactly-once counting → idempotent aggregation keyed by (user, track, play session).",
+      "Recommendations: collaborative filtering on listening matrices + audio/NLP embeddings; batch jobs build weekly playlists, online models rank home shelves.",
+      "Events delivered at-least-once to a durable pipeline, then processed in batch and streaming jobs."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "CDN edge outage",
+       "Playback fails in a region",
+       "Multi-CDN with client failover"
+      ],
+      [
+       "New album drop",
+       "Origin stampede",
+       "Pre-warm CDNs before release time"
+      ],
+      [
+       "Event pipeline lag",
+       "Delayed counts",
+       "Durable buffering; counts are not user-facing in real time"
+      ],
+      [
+       "Playlist edit conflicts",
+       "Lost changes",
+       "Revision-based merges (ops), like a mini Google Docs"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Delivery",
+       "CDN + prefetch",
+       "Control of every byte"
+      ],
+      [
+       "Offline",
+       "Encrypted files + license",
+       "Simplicity"
+      ],
+      [
+       "Counts",
+       "Batch exactly-once",
+       "Real-time royalties"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Search, play, playlists, offline, recs."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Fast start, no stutter, scale."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "30M streams → ~5 Tbps from CDN."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "Signed stream URLs; event batches."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Metadata services + CDN + event pipeline."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "ABR + prefetch, offline licensing, royalty counting."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Multi-CDN, release pre-warm, metrics: start time, rebuffer rate."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How is search built?",
+       "a": "Inverted index over tracks/artists/albums with typo tolerance and popularity boosting; typeahead cached per prefix."
+      },
+      {
+       "q": "How would you build a 'what's playing with friends' feature?",
+       "a": "Publish play events to a social fan-out service; WebSocket or polling for friends' activity."
+      },
+      {
+       "q": "How do you prevent piracy?",
+       "a": "Encryption with DRM keys per track, signed short-lived URLs, license checks for offline."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Bytes from CDN; services for metadata and keys.",
+      "Multi-bitrate chunks + ABR + next-track prefetch.",
+      "Offline: encrypted files + periodic license.",
+      "Events → durable pipeline → dedupe → royalties.",
+      "Pre-warm CDNs for big releases."
+     ]
+    }
+   ]
+  }
+ ]
+}

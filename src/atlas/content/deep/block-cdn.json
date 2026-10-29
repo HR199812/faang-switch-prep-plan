@@ -1,0 +1,257 @@
+{
+ "minutes": 11,
+ "sections": [
+  {
+   "id": "what",
+   "title": "What a CDN does",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "A Content Delivery Network is a globally distributed set of cache servers (points of presence, or PoPs) that sit between users and your origin. When a user requests an image, the nearest PoP serves it from its cache; only on a miss does the PoP fetch from your origin. The payoff is lower latency (the response travels a few milliseconds instead of across an ocean) and massively less load and egress on your origin."
+    },
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Latency",
+       "value": "~10–30 ms",
+       "sub": "to a nearby PoP vs 100+ ms cross-ocean"
+      },
+      {
+       "label": "Origin offload",
+       "value": "90–99%",
+       "sub": "for static assets"
+      },
+      {
+       "label": "PoPs",
+       "value": "hundreds",
+       "sub": "per major CDN"
+      },
+      {
+       "label": "Typical TTL",
+       "value": "minutes–a year",
+       "sub": "versioned assets: long"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "flow",
+   "title": "Request flow",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "User",
+      "Edge PoP",
+      "Shield (regional)",
+      "Origin"
+     ],
+     "steps": [
+      {
+       "from": "User",
+       "to": "Edge PoP",
+       "label": "GET /img/a1b2.jpg",
+       "note": "routed by anycast / DNS"
+      },
+      {
+       "from": "Edge PoP",
+       "to": "Shield (regional)",
+       "label": "miss → fetch"
+      },
+      {
+       "from": "Shield (regional)",
+       "to": "Origin",
+       "label": "miss → fetch",
+       "note": "origin shield collapses requests"
+      },
+      {
+       "from": "Origin",
+       "to": "Shield (regional)",
+       "label": "200 + Cache-Control",
+       "dashed": true
+      },
+      {
+       "from": "Shield (regional)",
+       "to": "Edge PoP",
+       "label": "200 (cached)",
+       "dashed": true
+      },
+      {
+       "from": "Edge PoP",
+       "to": "User",
+       "label": "200",
+       "dashed": true
+      },
+      {
+       "from": "User",
+       "to": "Edge PoP",
+       "label": "GET same object",
+       "note": "next user nearby"
+      },
+      {
+       "from": "Edge PoP",
+       "to": "User",
+       "label": "200 HIT",
+       "note": "no origin traffic",
+       "dashed": true
+      }
+     ],
+     "caption": "Cache miss then hit"
+    },
+    {
+     "t": "p",
+     "text": "An **origin shield** (a mid-tier cache) means a cold object is fetched from the origin once per region instead of once per PoP, and request collapsing ensures 1,000 simultaneous misses become one origin fetch."
+    }
+   ]
+  },
+  {
+   "id": "control",
+   "title": "Controlling what gets cached",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Header / technique",
+      "Effect"
+     ],
+     "rows": [
+      [
+       "Cache-Control: public, max-age=31536000, immutable",
+       "Cache for a year; never revalidate — use with versioned URLs"
+      ],
+      [
+       "Cache-Control: no-store",
+       "Never cache (personalised or sensitive responses)"
+      ],
+      [
+       "s-maxage",
+       "TTL for shared caches (CDN) separate from browsers"
+      ],
+      [
+       "stale-while-revalidate",
+       "Serve stale content while refreshing in the background"
+      ],
+      [
+       "ETag / Last-Modified",
+       "Cheap revalidation (304 Not Modified)"
+      ],
+      [
+       "Vary",
+       "Separate cache entries per header (e.g. Accept-Encoding)"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Version your static asset URLs (`app.3f9a1c.js`). Then you can cache them forever, and a deploy is just new URLs — no invalidation needed."
+    }
+   ]
+  },
+  {
+   "id": "invalidation",
+   "title": "Invalidation strategies",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Versioned URLs",
+       "pros": [
+        "Instant, reliable, free"
+       ],
+       "cons": [
+        "Only for assets you reference by URL you control"
+       ]
+      },
+      {
+       "title": "Purge API",
+       "pros": [
+        "Fix mistakes; update mutable URLs"
+       ],
+       "cons": [
+        "Takes seconds to propagate; rate-limited; easy to forget"
+       ]
+      },
+      {
+       "title": "Short TTLs",
+       "pros": [
+        "Simple"
+       ],
+       "cons": [
+        "More origin traffic; staleness window still exists"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "dynamic",
+   "title": "Beyond static files",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Dynamic acceleration:** even uncacheable API requests benefit — the CDN terminates TLS near the user and reuses warm, optimised connections to your origin.",
+      "**Edge compute** (Cloudflare Workers, Lambda@Edge): run auth checks, A/B routing, header rewrites or personalisation at the PoP.",
+      "**Video:** HLS/DASH segments are small, immutable files — perfect CDN objects.",
+      "**Security:** DDoS absorption, WAF rules and bot management live at the edge."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "push-pull",
+   "title": "Pull vs push CDNs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Pull (most common)",
+       "pros": [
+        "Caches fill on demand; nothing to upload"
+       ],
+       "cons": [
+        "First request per PoP is a miss"
+       ]
+      },
+      {
+       "title": "Push",
+       "pros": [
+        "Content is pre-positioned — good for big launches/large files"
+       ],
+       "cons": [
+        "You manage uploads and storage"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "interview",
+   "title": "How to use it in an interview",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "All static assets and media go to object storage with versioned keys, fronted by a CDN with long TTLs; the CDN absorbs the egress and our servers only handle API traffic."
+    },
+    {
+     "t": "list",
+     "items": [
+      "Say what's cacheable and what's not (personalised responses usually aren't).",
+      "Mention cache hit ratio as the metric to watch.",
+      "Mention signed URLs/cookies for private content (paid videos)."
+     ]
+    }
+   ]
+  }
+ ]
+}

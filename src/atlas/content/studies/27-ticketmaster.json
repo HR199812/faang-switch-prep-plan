@@ -1,0 +1,409 @@
+{
+ "id": "ticketmaster",
+ "num": 27,
+ "title": "Ticketmaster",
+ "summary": "Sell a fixed inventory of seats to a flash crowd without double-booking: a virtual waiting room, short-lived seat reservations with TTL locks, payment, and an event page served from cache.",
+ "tags": [
+  "Contention",
+  "Reservations",
+  "Waiting room",
+  "Consistency"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "transactions-locks",
+  "redis",
+  "caching",
+  "rate-limiting",
+  "patterns"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Browse and search events; view the seat map with availability"
+      ],
+      [
+       "Functional",
+       "Reserve seats for a few minutes, pay, receive tickets"
+      ],
+      [
+       "Non-functional",
+       "Never sell the same seat twice (strong consistency on booking)"
+      ],
+      [
+       "Non-functional",
+       "Survive on-sale spikes: millions of users for ~50k seats"
+      ],
+      [
+       "Non-functional",
+       "Browsing can be eventually consistent and heavily cached"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Popular on-sale",
+       "value": "~10M users",
+       "sub": "for ~50k seats"
+      },
+      {
+       "label": "Search/browse QPS",
+       "value": "~100k peak",
+       "sub": "cacheable"
+      },
+      {
+       "label": "Booking writes",
+       "value": "~5k/s",
+       "sub": "after the waiting room"
+      },
+      {
+       "label": "Hold time",
+       "value": "~10 min",
+       "sub": "per reservation"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Demand exceeds supply by 100×+. The design problem is admission control and contention, not raw throughput."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "GET  /events/{id}                         -> event + venue (CDN cached)\nGET  /events/{id}/seats                   -> availability map (cached ~1-5 s)\nPOST /events/{id}/reservations  {seat_ids[]}  -> {reservation_id, expires_at} | 409\nPOST /reservations/{id}/checkout {payment_token, idempotency_key} -> {booking_id}"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Table",
+      "Key",
+      "Fields"
+     ],
+     "rows": [
+      [
+       "events",
+       "event_id",
+       "venue, time, on_sale_at"
+      ],
+      [
+       "seats / tickets",
+       "(event_id, seat_id)",
+       "status: available | reserved | sold, reservation_id, reserved_until, version"
+      ],
+      [
+       "reservations",
+       "reservation_id",
+       "user_id, seat_ids, expires_at, status"
+      ],
+      [
+       "bookings",
+       "booking_id",
+       "user_id, seats, payment_id"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Users",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "CDN",
+        "kind": "edge",
+        "sub": "event pages"
+       },
+       {
+        "label": "Waiting room",
+        "kind": "service",
+        "sub": "queue + tokens"
+       }
+      ],
+      [
+       {
+        "label": "Event service",
+        "kind": "service",
+        "sub": "read-heavy"
+       },
+       {
+        "label": "Booking service",
+        "kind": "service",
+        "sub": "reserve / checkout"
+       }
+      ],
+      [
+       {
+        "label": "Search index",
+        "kind": "db"
+       },
+       {
+        "label": "Seat lock store",
+        "kind": "cache",
+        "sub": "Redis TTL locks"
+       },
+       {
+        "label": "Bookings DB",
+        "kind": "db",
+        "sub": "Postgres, row locks"
+       }
+      ],
+      [
+       {
+        "label": "Payment provider",
+        "kind": "ext"
+       }
+      ]
+     ],
+     "caption": "Admission control in front of a strongly consistent booking path"
+    }
+   ]
+  },
+  {
+   "id": "deep-reserve",
+   "title": "Deep dive: reserving a seat without double-booking",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Pessimistic: SELECT … FOR UPDATE",
+       "pros": [
+        "Simple and correct within one DB"
+       ],
+       "cons": [
+        "Locks held during user think time block others — never hold DB locks across a 10-minute checkout"
+       ]
+      },
+      {
+       "title": "Status + expiry column (optimistic)",
+       "pros": [
+        "UPDATE seats SET status='reserved', reserved_until=now()+10m WHERE id=? AND (status='available' OR reserved_until<now())",
+        "One atomic conditional write"
+       ],
+       "cons": [
+        "Need a sweeper or lazy expiry"
+       ]
+      },
+      {
+       "title": "Distributed lock with TTL (Redis SET NX PX)",
+       "pros": [
+        "Fast; TTL auto-releases abandoned holds"
+       ],
+       "cons": [
+        "The DB must still be the source of truth at checkout"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "At checkout: in one transaction, verify the reservation still owns the seats and flip them to `sold`; only then capture payment (or authorise first, capture after).",
+      "Use an idempotency key on checkout so a double-click can't book twice."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "A reservation is a conditional write with an expiry, not a held lock. Expired holds become available again without any cleanup job being on the critical path."
+    }
+   ]
+  },
+  {
+   "id": "deep-queue",
+   "title": "Deep dive: the virtual waiting room",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Enqueue",
+       "text": "At on-sale time users hitting the event are given a position (randomised for those who arrived before start)."
+      },
+      {
+       "title": "Admit",
+       "text": "A controller admits N users per second based on booking-service capacity, issuing signed, short-lived access tokens."
+      },
+      {
+       "title": "Notify",
+       "text": "Clients poll or hold an SSE/WebSocket connection to see their position and get the token."
+      },
+      {
+       "title": "Enforce",
+       "text": "The booking service rejects requests without a valid token — the queue is the rate limiter."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Tip",
+     "text": "Serve the seat map from cache with a few seconds' staleness; the conditional reserve write is what guarantees correctness, so a stale map only means an occasional 409."
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Shard seats by event_id: one hot event lives on one shard, which is fine because the waiting room caps its write rate.",
+      "Bots: CAPTCHA at queue entry, per-account limits, purchase caps.",
+      "Payment provider slow → reservations expire mid-checkout: extend the hold when payment starts.",
+      "General-admission events: model as an inventory counter decremented atomically instead of per-seat rows."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Strong consistency for booking",
+       "pros": [
+        "No double sales"
+       ],
+       "cons": [
+        "Lower write throughput per event"
+       ]
+      },
+      {
+       "title": "Eventual consistency for browsing",
+       "pros": [
+        "Cheap, cacheable, survives spikes"
+       ],
+       "cons": [
+        "Users sometimes see seats that are already gone"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "Browse, reserve, pay; on-sale spikes; no double booking."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Demand ≫ supply — admission control."
+      },
+      {
+       "min": "10–20",
+       "title": "HLD",
+       "text": "CDN + event service; booking service + DB."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "Conditional reserve with TTL; waiting room."
+      },
+      {
+       "min": "35–45",
+       "title": "Scale",
+       "text": "Shard by event, bots, payment timeouts."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "What happens if Redis loses a lock?",
+       "a": "The DB conditional write at checkout is the real guard; Redis only reduces contention."
+      },
+      {
+       "q": "How do you show live availability?",
+       "a": "Publish seat-status changes to a channel; clients subscribed via SSE get deltas, or just poll a cached map."
+      },
+      {
+       "q": "How do you keep the waiting room fair?",
+       "a": "Randomise early arrivals, issue one position per verified account, expire inactive positions."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Waiting room = admission control + signed tokens.",
+      "Reserve = conditional UPDATE with reserved_until.",
+      "Checkout = one transaction + idempotency key.",
+      "Browse from cache; correctness from the write."
+     ]
+    }
+   ]
+  }
+ ]
+}

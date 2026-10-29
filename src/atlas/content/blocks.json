@@ -1,0 +1,6506 @@
+{
+ "topics": [
+  {
+   "id": "estimation",
+   "title": "Back-of-Envelope Estimation",
+   "category": "Foundations",
+   "summary": "Turn vague scale into QPS, storage and bandwidth in two minutes, and let the numbers pick the design.",
+   "sections": [
+    {
+     "id": "why",
+     "title": "Why estimate",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "Estimation exists to justify design decisions: do we need a cache, sharding, a CDN, a queue? Estimate only what changes the design, round aggressively, and say the conclusion out loud."
+      },
+      {
+       "t": "table",
+       "head": [
+        "Shortcut",
+        "Value"
+       ],
+       "rows": [
+        [
+         "Seconds in a day",
+         "86,400 ≈ **10^5**"
+        ],
+        [
+         "1M requests/day",
+         "≈ 12 req/s"
+        ],
+        [
+         "100M requests/day",
+         "≈ 1,200 req/s"
+        ],
+        [
+         "Peak vs average",
+         "2–3× (10× for flash events)"
+        ],
+        [
+         "2^10 / 2^20 / 2^30 / 2^40",
+         "KB / MB / GB / TB (≈ 10^3, 10^6, 10^9, 10^12)"
+        ],
+        [
+         "Replication factor",
+         "×3 storage"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "latency",
+     "title": "Latency numbers",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Operation",
+        "Approx. time"
+       ],
+       "rows": [
+        [
+         "L1 cache reference",
+         "1 ns"
+        ],
+        [
+         "Main memory reference",
+         "100 ns"
+        ],
+        [
+         "SSD random read",
+         "16–100 µs"
+        ],
+        [
+         "Round trip in one data center",
+         "0.5 ms"
+        ],
+        [
+         "Redis GET over network",
+         "0.2–1 ms"
+        ],
+        [
+         "Indexed SQL point read",
+         "1–5 ms"
+        ],
+        [
+         "HDD seek",
+         "10 ms"
+        ],
+        [
+         "US ↔ Europe round trip",
+         "80–150 ms"
+        ],
+        [
+         "India ↔ US round trip",
+         "200–250 ms"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "tip",
+       "title": "Tip",
+       "text": "Memory is ~100× faster than SSD, SSD ~100× faster than a cross-continent round trip. That ladder is why caches and CDNs exist."
+      }
+     ]
+    },
+    {
+     "id": "worked",
+     "title": "Worked example",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "500M daily active users, each reads 20 items and writes 1 item (1 KB) per day."
+      },
+      {
+       "t": "stats",
+       "items": [
+        {
+         "label": "Read QPS",
+         "value": "100k",
+         "sub": "avg, ~300k peak"
+        },
+        {
+         "label": "Write QPS",
+         "value": "5k",
+         "sub": "avg"
+        },
+        {
+         "label": "Storage / year",
+         "value": "550 TB",
+         "sub": "with 3 replicas"
+        },
+        {
+         "label": "Read : write",
+         "value": "20 : 1",
+         "sub": "cache aggressively"
+        }
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "Read-heavy at 20:1, so I'll put a cache in front of the database. 5k writes/s fits a sharded store. 180 TB a year means partitioning from day one."
+      }
+     ]
+    },
+    {
+     "id": "availability",
+     "title": "Availability math",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "SLA",
+        "Downtime / year",
+        "Downtime / month"
+       ],
+       "rows": [
+        [
+         "99%",
+         "3.65 days",
+         "7.3 h"
+        ],
+        [
+         "99.9%",
+         "8.8 h",
+         "44 min"
+        ],
+        [
+         "99.99%",
+         "53 min",
+         "4.4 min"
+        ],
+        [
+         "99.999%",
+         "5.3 min",
+         "26 s"
+        ]
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Serial dependencies multiply (99.9% × 99.9% ≈ 99.8%). Parallel redundancy adds nines: two independent 99% replicas ≈ 99.99%."
+      }
+     ]
+    },
+    {
+     "id": "method",
+     "title": "A repeatable estimation method",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Pin the user count: DAU and how many actions each does per day.",
+        "Convert to QPS: actions/day ÷ 10^5. Multiply by 2–3 for peak (10× for flash sales, ticket drops, match finishes).",
+        "Split read vs write QPS; state the ratio — it decides cache-heavy vs write-heavy designs.",
+        "Storage: writes/day × object size × retention days × replication (3). Add indexes (~30%).",
+        "Bandwidth: QPS × response size (ingress for writes, egress for reads).",
+        "Memory for cache: hot fraction (often 20%) × daily read set × object size.",
+        "Servers: peak QPS ÷ per-node capacity, then +30–50% headroom and N+1 per AZ."
+       ],
+       "ordered": true
+      },
+      {
+       "t": "callout",
+       "tone": "tip",
+       "title": "Tip",
+       "text": "Write the numbers in a corner of the board and point back to them when you justify a cache, a shard count or a CDN."
+      }
+     ]
+    },
+    {
+     "id": "capacity",
+     "title": "Per-component capacity cheat sheet",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Component",
+        "Rough capacity / node",
+        "Limit usually hit first"
+       ],
+       "rows": [
+        [
+         "Nginx / Envoy proxy",
+         "50k–100k+ req/s",
+         "CPU on TLS"
+        ],
+        [
+         "Java/Go API server",
+         "2k–10k req/s",
+         "CPU, downstream latency"
+        ],
+        [
+         "Postgres primary",
+         "10k–30k simple TPS",
+         "Disk fsync, locks, connections"
+        ],
+        [
+         "Redis",
+         "100k–200k ops/s",
+         "Single thread, network"
+        ],
+        [
+         "Kafka broker",
+         "~100–200 MB/s",
+         "Disk/network throughput"
+        ],
+        [
+         "Cassandra node",
+         "10k–50k writes/s",
+         "Compaction, disk"
+        ],
+        [
+         "Elasticsearch node",
+         "1k–5k queries/s",
+         "Heap, shard count"
+        ],
+        [
+         "WebSocket gateway",
+         "50k–500k idle conns",
+         "Memory per connection, file descriptors"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "sizes",
+     "title": "Common object sizes",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Object",
+        "Size"
+       ],
+       "rows": [
+        [
+         "UUID / Snowflake ID",
+         "16 B / 8 B"
+        ],
+        [
+         "Tweet / chat message row",
+         "300 B–1 KB"
+        ],
+        [
+         "User profile row",
+         "1–2 KB"
+        ],
+        [
+         "Thumbnail",
+         "10–50 KB"
+        ],
+        [
+         "Photo (compressed)",
+         "200 KB–2 MB"
+        ],
+        [
+         "1 min audio 160 kbps",
+         "~1.2 MB"
+        ],
+        [
+         "1 min video 720p / 1080p / 4K",
+         "~20 / 50 / 200 MB"
+        ],
+        [
+         "LLM token",
+         "~4 characters of English"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "littles-law",
+     "title": "Little's law and concurrency",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "**Concurrency = throughput × latency.** 10k req/s at 200 ms means 2,000 requests in flight; with 200 threads per server you need 10 servers just to hold them. Use it to size thread pools, connection pools and WebSocket fleets."
+      },
+      {
+       "t": "code",
+       "lang": "text",
+       "text": "DB pool size ≈ queries/s × avg query time\n  5,000 q/s × 4 ms = 20 connections busy on average → pool of ~40 with headroom"
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "How many servers for 1M concurrent WebSocket users?",
+         "a": "At ~50k connections per server with headroom → ~25–30 servers, spread across AZs, plus capacity to absorb one AZ failing (≈ +50%)."
+        },
+        {
+         "q": "Why multiply storage by 3?",
+         "a": "Typical replication factor for durability; erasure coding would be ~1.4–1.5× instead."
+        },
+        {
+         "q": "How precise should estimates be?",
+         "a": "Order of magnitude. State assumptions, round to powers of ten, and move on in under 5 minutes."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "scaling-lb",
+   "title": "Scaling & Load Balancing",
+   "category": "Foundations",
+   "summary": "Scale stateless compute horizontally behind L4/L7 load balancers; push state into dedicated stores.",
+   "sections": [
+    {
+     "id": "scale",
+     "title": "Vertical vs horizontal",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Vertical (scale up)",
+         "pros": [
+          "No code change",
+          "Strong consistency is easy"
+         ],
+         "cons": [
+          "Hard ceiling",
+          "Expensive at the top",
+          "Single point of failure"
+         ]
+        },
+        {
+         "title": "Horizontal (scale out)",
+         "pros": [
+          "Near-linear capacity",
+          "Fault tolerant",
+          "Commodity hardware"
+         ],
+         "cons": [
+          "Needs stateless services",
+          "Data tier gets complex",
+          "Network failures"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Make services **stateless**: sessions in Redis or a signed JWT, uploads in S3, no local disk state. Then the load balancer can send any request to any instance."
+      }
+     ]
+    },
+    {
+     "id": "lb",
+     "title": "Load balancers",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Clients",
+          "kind": "client"
+         }
+        ],
+        [
+         {
+          "label": "DNS / Anycast",
+          "kind": "edge"
+         }
+        ],
+        [
+         {
+          "label": "L7 Load Balancer",
+          "kind": "edge",
+          "sub": "TLS, path routing"
+         }
+        ],
+        [
+         {
+          "label": "API #1",
+          "kind": "service"
+         },
+         {
+          "label": "API #2",
+          "kind": "service"
+         },
+         {
+          "label": "API #3",
+          "kind": "service"
+         }
+        ]
+       ],
+       "caption": "Stateless fleet behind an L7 balancer"
+      },
+      {
+       "t": "table",
+       "head": [
+        "Layer",
+        "Routes on",
+        "Use for"
+       ],
+       "rows": [
+        [
+         "L4 (transport)",
+         "IP + port",
+         "Raw throughput, TCP/UDP, WebSocket pass-through"
+        ],
+        [
+         "L7 (application)",
+         "Path, host, headers, cookies",
+         "TLS termination, path routing, canary, auth"
+        ]
+       ]
+      },
+      {
+       "t": "table",
+       "head": [
+        "Algorithm",
+        "Best when"
+       ],
+       "rows": [
+        [
+         "Round robin / weighted",
+         "Uniform short requests"
+        ],
+        [
+         "Least connections",
+         "Long-lived or uneven requests"
+        ],
+        [
+         "IP / consistent hash",
+         "Stickiness for caches or chat gateways"
+        ],
+        [
+         "Power of two choices",
+         "Huge fleets, no global state"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "tip",
+       "title": "Tip",
+       "text": "Health checks: active (/health) plus passive (eject after repeated 5xx). Drain connections on deploy."
+      }
+     ]
+    },
+    {
+     "id": "gateway",
+     "title": "Gateway vs proxy",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Reverse proxy**: sits in front of servers; TLS, compression, caching (NGINX).",
+        "**Load balancer**: a reverse proxy that spreads load across replicas.",
+        "**API gateway**: L7 proxy plus auth, rate limiting, API keys, request shaping, routing to microservices (Kong, AWS API Gateway)."
+       ],
+       "ordered": false
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "An L7 load balancer terminates TLS and routes by path. Behind it, stateless API servers autoscale on request rate."
+      }
+     ]
+    },
+    {
+     "id": "stateless",
+     "title": "Making services stateless",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "State",
+        "Where it moves"
+       ],
+       "rows": [
+        [
+         "Sessions",
+         "Redis with TTL, or signed JWT/cookie"
+        ],
+        [
+         "Uploaded files",
+         "S3 via presigned URLs"
+        ],
+        [
+         "In-memory caches",
+         "Local cache is fine if it's only an optimization; shared state to Redis"
+        ],
+        [
+         "Scheduled jobs",
+         "Distributed scheduler with leader election / locks"
+        ],
+        [
+         "WebSocket connections",
+         "Separate gateway tier + registry"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "lb-internals",
+     "title": "Load balancer internals",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**L4** works on TCP/UDP flows: NAT or direct server return; it can't see URLs; very fast (AWS NLB, Maglev, IPVS).",
+        "**L7** terminates TLS, parses HTTP, routes on path/host/header, retries, injects headers, does canaries (ALB, Envoy, NGINX).",
+        "**Global load balancing:** DNS (GeoDNS, latency-based), anycast IPs (Cloudflare, Google), or a global L7 front door.",
+        "**Maglev / consistent hashing** keeps a connection on the same backend even as LB instances change.",
+        "**Health checks:** active probes + passive outlier detection; slow-start new instances; drain on shutdown.",
+        "**Connection reuse:** keep-alive and HTTP/2 multiplexing between LB and backends cut handshake cost."
+       ]
+      },
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Client-side load balancing (gRPC, service mesh)",
+         "pros": [
+          "No extra hop",
+          "Smart per-request routing"
+         ],
+         "cons": [
+          "Every client needs discovery + logic"
+         ]
+        },
+        {
+         "title": "Server-side load balancer",
+         "pros": [
+          "Clients stay simple",
+          "Central policy"
+         ],
+         "cons": [
+          "Extra hop, LB must scale"
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "algorithms-deep",
+     "title": "Algorithms in depth",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Algorithm",
+        "How",
+        "Watch out"
+       ],
+       "rows": [
+        [
+         "Round robin",
+         "Rotate through backends",
+         "Ignores load; bad with uneven requests"
+        ],
+        [
+         "Weighted RR",
+         "Bigger machines get more",
+         "Static weights drift from reality"
+        ],
+        [
+         "Least connections",
+         "Pick fewest active",
+         "Needs shared state across LB nodes"
+        ],
+        [
+         "Least response time / EWMA",
+         "Pick fastest recent",
+         "Can herd onto one node"
+        ],
+        [
+         "Power of two choices",
+         "Pick 2 at random, choose the less loaded",
+         "Near-optimal, no global state"
+        ],
+        [
+         "Consistent hash (ring / Maglev / rendezvous)",
+         "Key → stable backend",
+         "Hot keys; need bounded loads"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "autoscaling-deep",
+     "title": "Autoscaling and capacity",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Reactive (target tracking on CPU, RPS, queue depth) vs scheduled (known peaks) vs predictive (forecast).",
+        "Scale on a leading metric: queue depth or in-flight requests react faster than CPU.",
+        "Cold starts: JVM warmup and cache warming make new instances slow; pre-scale before events.",
+        "Keep N+1 per AZ so losing an AZ doesn't overload the rest (run at ≤ 66% across 3 AZs).",
+        "Protect downstreams: scaling the API 10× can melt the database; add connection pooling (PgBouncer) and limits."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "multi-region",
+     "title": "Multi-region patterns",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Pattern",
+        "How",
+        "Trade-off"
+       ],
+       "rows": [
+        [
+         "Active-passive",
+         "One region serves, other on standby",
+         "Simple; failover takes minutes; idle cost"
+        ],
+        [
+         "Active-active reads",
+         "All regions read, writes to home region",
+         "Fast reads; write latency for far users"
+        ],
+        [
+         "Active-active writes",
+         "Writes anywhere, replicate both ways",
+         "Conflict resolution needed"
+        ],
+        [
+         "Cell-based",
+         "Users pinned to independent cells",
+         "Limits blast radius; cross-cell features harder"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "L4 or L7 for WebSockets?",
+         "a": "Either works: L4 passes the long-lived TCP through cheaply; L7 can route the upgrade by path and do auth. Use least-connections or consistent hashing."
+        },
+        {
+         "q": "How do you deploy without dropping requests?",
+         "a": "Rolling or blue/green: mark instance unhealthy, drain in-flight requests (connection draining), then stop; readiness probes gate new instances."
+        },
+        {
+         "q": "What's a thundering herd at the LB?",
+         "a": "Many clients reconnect at once after an outage; mitigate with jittered client backoff, admission control and slow start."
+        },
+        {
+         "q": "Sticky sessions — good or bad?",
+         "a": "Avoid for HTTP (uneven load, failover loses state); acceptable for WebSockets or local cache affinity via consistent hashing."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cdn",
+   "title": "CDN & Edge",
+   "category": "Foundations",
+   "summary": "Serve cacheable bytes from the edge; correctness lives in the cache key, TTL and purge strategy.",
+   "sections": [
+    {
+     "id": "how",
+     "title": "How a CDN works",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "User in Pune",
+          "kind": "client"
+         }
+        ],
+        [
+         {
+          "label": "Edge PoP Mumbai",
+          "kind": "edge",
+          "sub": "cache hit ~20 ms"
+         }
+        ],
+        [
+         {
+          "label": "Origin shield",
+          "kind": "cache",
+          "sub": "one mid-tier"
+         }
+        ],
+        [
+         {
+          "label": "Origin / S3",
+          "kind": "store"
+         }
+        ]
+       ],
+       "caption": "Miss path goes edge → shield → origin"
+      },
+      {
+       "t": "table",
+       "head": [
+        "Type",
+        "How",
+        "Use for"
+       ],
+       "rows": [
+        [
+         "Pull",
+         "Edge fetches from origin on first miss",
+         "Websites, images, APIs"
+        ],
+        [
+         "Push",
+         "You upload to the CDN ahead of time",
+         "Large predictable assets, video segments"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "correct",
+     "title": "Getting it right",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Cache key**: path plus only the query params and headers that change the response.",
+        "**TTL** through Cache-Control (max-age, s-maxage, stale-while-revalidate).",
+        "**Versioned file names** (app.3f9c.js) so you never purge static assets.",
+        "**Purge API** for content that must change now; an origin shield stops a purge from stampeding the origin.",
+        "**Signed URLs / cookies** for private content (paid video)."
+       ],
+       "ordered": false
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "Never cache personalized responses under a shared key. Add the user or locale to the key, or mark it private."
+      }
+     ]
+    },
+    {
+     "id": "headers",
+     "title": "Cache-Control in practice",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Header / directive",
+        "Meaning"
+       ],
+       "rows": [
+        [
+         "max-age=N",
+         "Browser and shared caches may reuse for N seconds"
+        ],
+        [
+         "s-maxage=N",
+         "Override for shared caches (CDN) only"
+        ],
+        [
+         "stale-while-revalidate=N",
+         "Serve stale while fetching fresh in background"
+        ],
+        [
+         "stale-if-error=N",
+         "Serve stale if origin errors"
+        ],
+        [
+         "no-cache",
+         "Must revalidate (ETag / If-None-Match) before use"
+        ],
+        [
+         "no-store",
+         "Never cache (sensitive data)"
+        ],
+        [
+         "private",
+         "Only the browser may cache"
+        ],
+        [
+         "Vary: Accept-Encoding, Accept-Language",
+         "Separate cache entries per header value"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "tiers",
+     "title": "CDN topology",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Edge PoPs near users → regional / shield tier → origin. Each miss climbs one level.",
+        "Origin shield collapses many edge misses into one origin request (request coalescing).",
+        "Tiered caching lifts hit ratio for the long tail.",
+        "Edge compute (Cloudflare Workers, Lambda@Edge) for auth checks, A/B, header rewrites, personalization at the edge."
+       ]
+      },
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "User",
+          "kind": "client"
+         }
+        ],
+        [
+         {
+          "label": "Edge PoP",
+          "kind": "edge",
+          "sub": "~90% hits"
+         }
+        ],
+        [
+         {
+          "label": "Regional shield",
+          "kind": "cache"
+         }
+        ],
+        [
+         {
+          "label": "Origin",
+          "kind": "service"
+         }
+        ]
+       ],
+       "caption": "Hit ratio improves at each tier"
+      }
+     ]
+    },
+    {
+     "id": "invalidation",
+     "title": "Invalidation strategies",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Strategy",
+        "When",
+        "Cost"
+       ],
+       "rows": [
+        [
+         "Versioned URLs (hash in filename)",
+         "Static assets",
+         "Free; old versions expire naturally"
+        ],
+        [
+         "Short TTL + stale-while-revalidate",
+         "Semi-dynamic pages, APIs",
+         "Some origin load"
+        ],
+        [
+         "Purge by URL / tag (surrogate keys)",
+         "Content that must change now",
+         "Purge API latency, origin spike"
+        ],
+        [
+         "Soft purge (mark stale)",
+         "Avoid origin stampede",
+         "Users may see stale once"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "video",
+     "title": "Video and large files",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Segment video into 2–6 s chunks (HLS/DASH) so each segment caches independently.",
+        "Range requests for large files; CDN caches byte ranges or full objects.",
+        "Pre-warm (push) popular new content before a launch.",
+        "ISP-embedded caches (Netflix Open Connect, Google Global Cache) for very high egress."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "security",
+     "title": "Security at the edge",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "TLS termination and certificate management at the edge.",
+        "DDoS absorption (anycast spreads attack traffic), WAF rules, bot management.",
+        "Signed URLs / cookies with expiry for paid or private content.",
+        "Origin only accepts traffic from the CDN (IP allowlist or auth header)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "A deploy shipped broken CSS cached for a day. Fix?",
+         "a": "Versioned asset names so new HTML points to new files; for the bad URL, purge it; set long TTL only on hashed assets."
+        },
+        {
+         "q": "Can you cache API responses at the CDN?",
+         "a": "Yes for public, shared responses with short TTLs and correct cache keys; never personalized data under a shared key."
+        },
+        {
+         "q": "How do you measure CDN effectiveness?",
+         "a": "Cache hit ratio (requests and bytes), origin offload, edge latency p95, error rate by PoP."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "networking",
+   "category": "Foundations",
+   "title": "Networking Essentials",
+   "summary": "What actually happens between client and server: DNS, TCP vs UDP, TLS, HTTP/1.1 vs 2 vs 3, and L4 vs L7 load balancing — the vocabulary every design answer leans on.",
+   "sections": [
+    {
+     "id": "layers",
+     "title": "The layers that matter",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Layer",
+        "What it does",
+        "Interview relevance"
+       ],
+       "rows": [
+        [
+         "DNS",
+         "Name → IP; TTL-cached at many levels",
+         "GeoDNS for routing users to regions; slow failover because of TTLs"
+        ],
+        [
+         "TCP",
+         "Reliable, ordered byte stream; 3-way handshake",
+         "Connection setup cost; head-of-line blocking"
+        ],
+        [
+         "UDP",
+         "Unreliable datagrams, no handshake",
+         "Video calls, games, DNS, QUIC"
+        ],
+        [
+         "TLS",
+         "Encryption + server identity",
+         "Extra round trips (1-RTT in TLS 1.3); terminate at the LB"
+        ],
+        [
+         "HTTP",
+         "Request/response semantics",
+         "Versions differ in multiplexing and transport"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "http",
+     "title": "HTTP/1.1 vs HTTP/2 vs HTTP/3",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "HTTP/1.1",
+         "pros": [
+          "Simple, universal"
+         ],
+         "cons": [
+          "One request at a time per connection → browsers open ~6 connections"
+         ]
+        },
+        {
+         "title": "HTTP/2",
+         "pros": [
+          "Multiplexed streams over one TCP connection",
+          "Header compression"
+         ],
+         "cons": [
+          "TCP head-of-line blocking: one lost packet stalls all streams"
+         ]
+        },
+        {
+         "title": "HTTP/3 (QUIC over UDP)",
+         "pros": [
+          "Independent streams — no TCP HOL blocking",
+          "0/1-RTT setup; connection migration across networks"
+         ],
+         "cons": [
+          "UDP sometimes blocked; newer tooling"
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "lb",
+     "title": "L4 vs L7 load balancing",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "L4 (TCP/UDP)",
+         "pros": [
+          "Very fast; sees only IP:port",
+          "Good for long-lived connections (WebSockets, databases)"
+         ],
+         "cons": [
+          "Can't route by path/header"
+         ]
+        },
+        {
+         "title": "L7 (HTTP)",
+         "pros": [
+          "Route by path, header, cookie; TLS termination; retries",
+          "Canary and A/B routing"
+         ],
+         "cons": [
+          "More CPU; per-request work"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "I'd put an L7 load balancer in front of stateless HTTP services and an L4 balancer in front of the WebSocket gateways."
+      }
+     ]
+    },
+    {
+     "id": "latency",
+     "title": "Round trips add up",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "New HTTPS connection over TCP + TLS 1.3 ≈ DNS + 1 RTT (TCP) + 1 RTT (TLS) before the first byte of the request.",
+        "Cross-continent RTT ≈ 100–150 ms, so connection reuse (keep-alive, HTTP/2) and edge termination (CDN) matter more than server speed.",
+        "Anycast IPs route users to the nearest edge PoP."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "realtime",
+     "title": "Realtime transports",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Option",
+        "Direction",
+        "Use"
+       ],
+       "rows": [
+        [
+         "Long polling",
+         "Server → client (emulated)",
+         "Simple, works everywhere"
+        ],
+        [
+         "SSE",
+         "Server → client",
+         "Feeds, notifications, LLM token streaming"
+        ],
+        [
+         "WebSocket",
+         "Bidirectional",
+         "Chat, collaboration, games"
+        ],
+        [
+         "WebRTC",
+         "Peer-to-peer media (UDP)",
+         "Video/voice calls"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "questions",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Why does DNS failover take minutes?",
+         "a": "Resolvers and clients cache records for the TTL; lowering TTLs helps but increases DNS load."
+        },
+        {
+         "q": "Where do you terminate TLS?",
+         "a": "At the edge / load balancer, re-encrypting to backends if the internal network isn't trusted (mTLS in a mesh)."
+        },
+        {
+         "q": "Why do gRPC services need special load balancing?",
+         "a": "HTTP/2 keeps one long-lived connection, so L4 balancing pins all requests to one backend; use L7 (per-request) or client-side balancing."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "caching",
+   "title": "Caching Strategies",
+   "category": "Caching",
+   "summary": "Cache-aside by default; pick write strategy, eviction and invalidation deliberately and defend against stampedes.",
+   "sections": [
+    {
+     "id": "layers",
+     "title": "Cache layers",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Browser",
+          "kind": "client"
+         }
+        ],
+        [
+         {
+          "label": "CDN",
+          "kind": "edge"
+         }
+        ],
+        [
+         {
+          "label": "In-process cache",
+          "kind": "cache",
+          "sub": "Caffeine"
+         }
+        ],
+        [
+         {
+          "label": "Redis cluster",
+          "kind": "cache"
+         }
+        ],
+        [
+         {
+          "label": "Database",
+          "kind": "db",
+          "sub": "buffer pool"
+         }
+        ]
+       ],
+       "caption": "Closer to the user = faster, harder to invalidate"
+      }
+     ]
+    },
+    {
+     "id": "strategies",
+     "title": "Read and write strategies",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Strategy",
+        "How",
+        "Strength",
+        "Weakness"
+       ],
+       "rows": [
+        [
+         "Cache-aside",
+         "App reads cache → on miss reads DB, fills cache; on write updates DB then deletes key",
+         "Simple; cache outage not fatal",
+         "Stale window; first read misses"
+        ],
+        [
+         "Read-through",
+         "Cache library loads from DB on miss",
+         "Clean app code",
+         "Same staleness"
+        ],
+        [
+         "Write-through",
+         "Write cache + DB synchronously",
+         "Always fresh",
+         "Slow writes; caches unread data"
+        ],
+        [
+         "Write-behind",
+         "Write cache, flush DB async in batches",
+         "Fast writes, absorbs bursts",
+         "Data loss if cache dies"
+        ],
+        [
+         "Write-around",
+         "Write DB only",
+         "No cache pollution",
+         "Recent writes miss"
+        ]
+       ]
+      },
+      {
+       "t": "code",
+       "lang": "java",
+       "text": "// cache-aside read\nUser get(long id) {\n  String k = \"user:\" + id;\n  User u = redis.get(k);\n  if (u != null) return u;\n  u = db.findUser(id);\n  redis.setex(k, 300 + rnd(30), u); // TTL with jitter\n  return u;\n}\n// write: update DB, then DELETE the key (not update)\nvoid update(User u) { db.save(u); redis.del(\"user:\" + u.id); }"
+      },
+      {
+       "t": "callout",
+       "tone": "tip",
+       "title": "Tip",
+       "text": "Delete the key on write instead of updating it: two concurrent updates can leave the older value in the cache. For tighter freshness, invalidate from the DB change stream (CDC)."
+      }
+     ]
+    },
+    {
+     "id": "eviction",
+     "title": "Eviction",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Policy",
+        "Evicts",
+        "Good for"
+       ],
+       "rows": [
+        [
+         "LRU",
+         "Least recently used",
+         "General default (hash map + doubly linked list, O(1))"
+        ],
+        [
+         "LFU",
+         "Least frequently used",
+         "Stable popularity skew"
+        ],
+        [
+         "TTL",
+         "Expired keys",
+         "Freshness bounds; add ±10% jitter"
+        ],
+        [
+         "FIFO / random",
+         "Oldest / random",
+         "Rarely the right answer"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "failures",
+     "title": "Failure modes",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Problem",
+        "What happens",
+        "Fix"
+       ],
+       "rows": [
+        [
+         "Stampede",
+         "Hot key expires; thousands hit the DB at once",
+         "Single-flight / per-key lock, early probabilistic refresh, serve stale while revalidating"
+        ],
+        [
+         "Penetration",
+         "Lookups for keys that don't exist always miss",
+         "Cache nulls with short TTL; Bloom filter"
+        ],
+        [
+         "Avalanche",
+         "Many keys expire together or cache dies",
+         "Jittered TTLs, multi-level cache, circuit breaker"
+        ],
+        [
+         "Hot key",
+         "One shard overloaded",
+         "Local cache, key replicas (key#1..N)"
+        ],
+        [
+         "Big key",
+         "Multi-MB value blocks Redis",
+         "Split into hashes/chunks"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "Cache-aside with a 5-minute jittered TTL; writes delete the key. For hot keys I coalesce misses so only one request reaches the database."
+      }
+     ]
+    },
+    {
+     "id": "consistency",
+     "title": "Cache consistency in depth",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**The race:** reader A misses, reads old value from DB; writer B updates DB and deletes key; A then writes the old value into cache. Stale until TTL.",
+        "Mitigations: short TTL as safety net; delayed double delete; versioned values (store version, reject older sets); lease tokens (Facebook memcache leases) so only the reader holding the lease can fill.",
+        "**CDC-driven invalidation:** DB binlog → Debezium → Kafka → invalidator deletes keys. Ordered by commit, survives app bugs.",
+        "**Write-through with versions** for read-your-writes; route a user's reads to the primary for a few seconds after their write."
+       ]
+      },
+      {
+       "t": "code",
+       "lang": "text",
+       "text": "Lease pattern (memcache):\n GET k → miss → server returns lease token L\n reader loads from DB, SET k v L  → accepted only if L still valid\n a DELETE in between invalidates L → stale fill rejected"
+      }
+     ]
+    },
+    {
+     "id": "stampede",
+     "title": "Stampede protection techniques",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Technique",
+        "How",
+        "Best for"
+       ],
+       "rows": [
+        [
+         "Single-flight / request coalescing",
+         "One in-flight load per key per process; others wait",
+         "Hot keys in one service"
+        ],
+        [
+         "Distributed mutex",
+         "SET lock:k NX PX; losers wait or serve stale",
+         "Expensive recompute across fleet"
+        ],
+        [
+         "Probabilistic early expiration (XFetch)",
+         "Refresh early with probability rising near TTL",
+         "Smooth refresh, no locks"
+        ],
+        [
+         "Stale-while-revalidate",
+         "Serve old, refresh in background",
+         "Read-heavy tolerant data"
+        ],
+        [
+         "Pre-warming",
+         "Load hot keys before traffic",
+         "Deploys, cache restarts, launches"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "sizing",
+     "title": "Sizing and hit ratio",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Hit ratio drives everything: at 95% hits, DB sees 5% of traffic; dropping to 90% doubles DB load.",
+        "Working-set analysis: measure key popularity (Zipfian); 20% of keys often serve 80%+ of reads.",
+        "Memory = hot keys × (key + value + ~50–100 B overhead per entry).",
+        "Watch eviction rate; rising evictions with steady traffic means the cache is too small."
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "tip",
+       "title": "Tip",
+       "text": "Quote the DB load at your hit ratio: \"At 98% hits, 100k reads/s becomes 2k/s on the database.\""
+      }
+     ]
+    },
+    {
+     "id": "local-vs-dist",
+     "title": "Local vs distributed caches",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "In-process (Caffeine, Guava)",
+         "pros": [
+          "Nanosecond reads, no network",
+          "Absorbs hot keys"
+         ],
+         "cons": [
+          "Each instance has its own copy",
+          "Invalidation across instances is hard",
+          "Heap pressure / GC"
+         ]
+        },
+        {
+         "title": "Distributed (Redis, Memcached)",
+         "pros": [
+          "Shared by all instances",
+          "Large capacity"
+         ],
+         "cons": [
+          "Network hop (~0.5 ms)",
+          "Separate system to run"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Common answer: two-level cache — small local LRU with seconds of TTL in front of Redis; invalidate via pub/sub broadcast."
+      }
+     ]
+    },
+    {
+     "id": "what-to-cache",
+     "title": "What to cache and keys",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Cache objects (user:42), query results (feed:42:page1), computed aggregates (counts), rendered fragments, negative results.",
+        "Key design: namespace + version + id (`v3:user:42`); bumping the version invalidates everything at once.",
+        "Don't cache: rapidly changing data with strict correctness (balances), very large values, highly personalized low-reuse data.",
+        "Serialization: compact formats (protobuf, MessagePack) cut memory and network."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Write-through or cache-aside for a product catalog?",
+         "a": "Cache-aside with TTL and delete-on-write; catalog is read-heavy and occasional staleness is acceptable."
+        },
+        {
+         "q": "How do you keep cache and DB consistent?",
+         "a": "You can't make them atomic; bound staleness with TTL, invalidate on write (or via CDC), and use leases/versions to avoid stale fills."
+        },
+        {
+         "q": "Cache went down; DB is overwhelmed. What now?",
+         "a": "Circuit-break to serve degraded responses, rate-limit, warm the cache gradually, use replicas; long-term run cache with replicas and multiple AZs."
+        },
+        {
+         "q": "How do you cache paginated feeds?",
+         "a": "Cache the list of IDs per user (or per page key) and hydrate objects from an object cache; cursor pagination keeps keys stable."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "redis",
+   "title": "Redis Deep Dive",
+   "category": "Caching",
+   "summary": "Single-threaded in-memory data structure server: cache, sessions, counters, leaderboards, locks, queues.",
+   "sections": [
+    {
+     "id": "structures",
+     "title": "Data structures → jobs",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Structure",
+        "Commands",
+        "Typical job"
+       ],
+       "rows": [
+        [
+         "String",
+         "GET/SET/INCR/SETEX",
+         "Cache values, counters, rate limits"
+        ],
+        [
+         "Hash",
+         "HSET/HGETALL",
+         "Objects, sessions"
+        ],
+        [
+         "List",
+         "LPUSH/BRPOP",
+         "Simple queues, recent items"
+        ],
+        [
+         "Set",
+         "SADD/SISMEMBER",
+         "Unique members, tags, online users"
+        ],
+        [
+         "Sorted set",
+         "ZADD/ZRANGE/ZRANGEBYSCORE",
+         "Leaderboards, sliding-window limits, delayed jobs"
+        ],
+        [
+         "HyperLogLog",
+         "PFADD/PFCOUNT",
+         "Unique counts in 12 KB (~0.8% error)"
+        ],
+        [
+         "Bitmap",
+         "SETBIT/BITCOUNT",
+         "Daily active flags per user"
+        ],
+        [
+         "Geo",
+         "GEOADD/GEOSEARCH",
+         "Nearby drivers/stores"
+        ],
+        [
+         "Streams",
+         "XADD/XREADGROUP",
+         "Durable log with consumer groups"
+        ],
+        [
+         "Pub/Sub",
+         "PUBLISH/SUBSCRIBE",
+         "Fire-and-forget fan-out (typing, presence)"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "ops",
+     "title": "Persistence & availability",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**RDB** snapshots: compact, fast restart, can lose minutes.",
+        "**AOF** append log: fsync every second loses ≤ 1 s; rewrite compacts it.",
+        "**Replication** is async: failover can lose the last writes.",
+        "**Sentinel** monitors and promotes a replica automatically.",
+        "**Cluster**: 16,384 hash slots, slot = CRC16(key) mod 16384. Use hash tags `{user:42}` to keep related keys together for multi-key ops.",
+        "Atomic multi-step logic via **Lua scripts** or MULTI/EXEC."
+       ],
+       "ordered": false
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "Redis is not your system of record unless you accept losing the last second of writes. Use it as a cache or for data you can rebuild."
+      }
+     ]
+    },
+    {
+     "id": "patterns",
+     "title": "Patterns you'll be asked about",
+     "blocks": [
+      {
+       "t": "code",
+       "lang": "text",
+       "text": "Lock:         SET lock:job42 <uuid> NX PX 30000   (release via Lua compare-and-delete)\nRate limit:   INCR rl:u42:1730100000 ; EXPIRE 60\nLeaderboard:  ZINCRBY lb 10 user42 ; ZREVRANGE lb 0 9 WITHSCORES\nSession:      HSET sess:abc uid 42 ; EXPIRE sess:abc 1800\nDelayed job:  ZADD jobs <runAtMillis> job42 ; ZRANGEBYSCORE jobs 0 <now>"
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "Redis executes commands on one thread, so INCR and SET NX are atomic without extra locking. For anything multi-step I'd use a Lua script."
+      }
+     ]
+    },
+    {
+     "id": "internals",
+     "title": "How Redis works inside",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Event loop (epoll/kqueue) on a single thread executes commands; since 6.0, I/O threads handle socket reads/writes.",
+        "Encodings: small hashes/sets/zsets use compact listpacks; they convert to hash tables / skip lists past thresholds — memory-efficient for small objects.",
+        "Sorted set = skip list (ordered ops) + hash table (member lookup).",
+        "Expiry: lazy (checked on access) + active sampling of expired keys each cycle.",
+        "Persistence via `fork()`: copy-on-write snapshot; big datasets can double memory briefly during RDB/AOF rewrite.",
+        "Pipelining batches commands to cut round trips; MULTI/EXEC queues commands executed atomically (no rollback)."
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "`KEYS *`, `FLUSHALL`, `SMEMBERS` on a million-member set, or `DEL` of a huge key block the single thread for everyone. Use SCAN and UNLINK."
+      }
+     ]
+    },
+    {
+     "id": "eviction-deep",
+     "title": "Memory and eviction policies",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Policy",
+        "Evicts from",
+        "Use"
+       ],
+       "rows": [
+        [
+         "noeviction",
+         "Nothing (writes fail)",
+         "Queues, sessions, anything you can't lose silently"
+        ],
+        [
+         "allkeys-lru",
+         "Any key, least recently used",
+         "Pure caches"
+        ],
+        [
+         "allkeys-lfu",
+         "Any key, least frequently used",
+         "Caches with stable hot set"
+        ],
+        [
+         "volatile-lru / lfu / ttl",
+         "Only keys with TTL",
+         "Mixed cache + persistent data (better: separate instances)"
+        ],
+        [
+         "allkeys-random",
+         "Random",
+         "Rarely right"
+        ]
+       ]
+      },
+      {
+       "t": "p",
+       "text": "LRU/LFU are approximated by sampling `maxmemory-samples` keys, not a perfect global order."
+      }
+     ]
+    },
+    {
+     "id": "ha",
+     "title": "Replication, Sentinel and Cluster",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Setup",
+        "Gives you",
+        "Limits"
+       ],
+       "rows": [
+        [
+         "Primary + replicas",
+         "Read scaling, warm standby",
+         "Manual failover"
+        ],
+        [
+         "Sentinel",
+         "Automatic failover, service discovery",
+         "Still one primary's memory and CPU"
+        ],
+        [
+         "Cluster",
+         "Sharding across primaries + failover",
+         "Multi-key ops only within a slot; no SELECT db"
+        ],
+        [
+         "Managed (ElastiCache / MemoryDB)",
+         "Ops handled; MemoryDB adds durable multi-AZ log",
+         "Cost"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "streams",
+     "title": "Streams, Pub/Sub and queues",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Streams",
+         "pros": [
+          "Persistent log with IDs",
+          "Consumer groups, ack, pending entries list, XCLAIM for stuck messages"
+         ],
+         "cons": [
+          "Memory-bound, trim with MAXLEN"
+         ]
+        },
+        {
+         "title": "Pub/Sub",
+         "pros": [
+          "Very low latency fan-out",
+          "Simple"
+         ],
+         "cons": [
+          "No persistence; offline subscribers miss messages"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "code",
+       "lang": "text",
+       "text": "XADD jobs MAXLEN ~ 100000 * type email to u42\nXREADGROUP GROUP workers w1 COUNT 10 BLOCK 5000 STREAMS jobs >\nXACK jobs workers 1730171111111-0\nXAUTOCLAIM jobs workers w2 60000 0   # take over messages idle > 60 s"
+      }
+     ]
+    },
+    {
+     "id": "lua",
+     "title": "Atomic scripts",
+     "blocks": [
+      {
+       "t": "code",
+       "lang": "lua",
+       "text": "-- safe lock release: delete only if we own it\nif redis.call('GET', KEYS[1]) == ARGV[1] then\n  return redis.call('DEL', KEYS[1])\nend\nreturn 0"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Scripts run atomically on the single thread; keep them short.",
+        "In Cluster, all keys must be in one slot (hash tags).",
+        "Redis 7 Functions persist server-side libraries."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Redis vs Memcached?",
+         "a": "Redis: data structures, persistence, replication, Lua, streams. Memcached: simple multi-threaded KV cache, slightly simpler to scale for pure caching."
+        },
+        {
+         "q": "How do you find big or hot keys?",
+         "a": "`redis-cli --bigkeys`, `--hotkeys` (with LFU), MEMORY USAGE, and client-side metrics."
+        },
+        {
+         "q": "Is MULTI/EXEC a transaction?",
+         "a": "It's atomic execution without rollback; use WATCH for optimistic concurrency (abort if a watched key changed)."
+        },
+        {
+         "q": "How would you implement a sliding-window rate limiter?",
+         "a": "Sorted set per key with timestamps; Lua: ZREMRANGEBYSCORE old, ZCARD, ZADD if under limit, EXPIRE."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "databases",
+   "title": "Databases & Indexing",
+   "category": "Data",
+   "summary": "Choose the store from the access pattern; understand B-trees vs LSM trees and what each index costs.",
+   "sections": [
+    {
+     "id": "choose",
+     "title": "Which store",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Need",
+        "Pick",
+        "Watch out"
+       ],
+       "rows": [
+        [
+         "Transactions, joins, strong consistency",
+         "PostgreSQL / MySQL",
+         "Write scaling needs sharding"
+        ],
+        [
+         "Massive writes, key access, time series",
+         "Cassandra / DynamoDB",
+         "Model each query as a table"
+        ],
+        [
+         "Flexible per-entity documents",
+         "MongoDB",
+         "Avoid cross-document transactions"
+        ],
+        [
+         "Sub-ms lookups, counters",
+         "Redis",
+         "Memory-bound, async replication"
+        ],
+        [
+         "Full-text search",
+         "Elasticsearch",
+         "Secondary index, not source of truth"
+        ],
+        [
+         "Analytics over billions of rows",
+         "ClickHouse / BigQuery",
+         "Columnar, append-heavy"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "engines",
+     "title": "B-tree vs LSM tree",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "B-tree (Postgres, InnoDB)",
+         "pros": [
+          "Fast point + range reads",
+          "Predictable latency",
+          "Update in place"
+         ],
+         "cons": [
+          "Random writes",
+          "Write amplification on page splits"
+         ]
+        },
+        {
+         "title": "LSM tree (Cassandra, RocksDB)",
+         "pros": [
+          "Very fast sequential writes",
+          "Good compression"
+         ],
+         "cons": [
+          "Reads check several SSTables",
+          "Compaction spikes"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "p",
+       "text": "LSM write path: commit log + memtable → flush to immutable SSTable → background compaction. Bloom filters skip SSTables that can't hold the key."
+      }
+     ]
+    },
+    {
+     "id": "indexes",
+     "title": "Indexes",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Composite index** (a, b, c) serves queries on a, (a, b), (a, b, c): the leftmost-prefix rule.",
+        "**Covering index** answers the query from the index alone, no table lookup.",
+        "**Partial index** indexes only rows matching a condition (status = 'OPEN').",
+        "Every index speeds reads and slows writes and uses storage.",
+        "Use EXPLAIN: a sequential scan on a big table means a missing index."
+       ],
+       "ordered": false
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "The hot query is 'orders for a customer, newest first', so the index is (customer_id, created_at DESC)."
+      }
+     ]
+    },
+    {
+     "id": "acid-mvcc",
+     "title": "Inside a relational database",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**WAL (write-ahead log):** every change is appended and fsynced before commit; crash recovery replays it. Durability = WAL on disk.",
+        "**Buffer pool:** hot pages in memory; dirty pages flushed by checkpoints.",
+        "**MVCC:** each row version carries transaction IDs; readers see a snapshot, writers create new versions; vacuum (Postgres) / purge (InnoDB) cleans old versions.",
+        "**Clustered index (InnoDB):** rows stored in primary-key order — random UUID PKs cause page splits; prefer sequential/time-ordered IDs.",
+        "**Query planner:** chooses index vs scan from statistics; stale stats → bad plans (`ANALYZE`)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "indexing-deep",
+     "title": "Indexing deep dive",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Index",
+        "Structure",
+        "Good for",
+        "Not for"
+       ],
+       "rows": [
+        [
+         "B+ tree",
+         "Balanced tree, leaves linked",
+         "=, <, >, BETWEEN, ORDER BY, prefix LIKE 'ab%'",
+         "LIKE '%ab', functions on column"
+        ],
+        [
+         "Hash",
+         "Hash table",
+         "Exact match",
+         "Ranges, sorting"
+        ],
+        [
+         "GIN / inverted",
+         "Term → rows",
+         "Full-text, JSONB containment, arrays",
+         "Range scans"
+        ],
+        [
+         "GiST / R-tree",
+         "Bounding boxes",
+         "Geo, ranges overlap",
+         "Simple equality"
+        ],
+        [
+         "BRIN",
+         "Min/max per block range",
+         "Huge append-only time series",
+         "Random data"
+        ],
+        [
+         "Bitmap",
+         "Bit per row per value",
+         "Low-cardinality analytics",
+         "OLTP writes"
+        ]
+       ]
+      },
+      {
+       "t": "list",
+       "items": [
+        "Composite index order: equality columns first, then range, then sort: `(tenant_id, status, created_at)`.",
+        "Covering index (`INCLUDE`) avoids heap lookups.",
+        "Selectivity matters: an index on a boolean rarely helps.",
+        "Every index adds write amplification and storage; drop unused ones."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "nosql-models",
+     "title": "NoSQL data modelling",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Query-first design:** list access patterns, then design one table (or partition) per pattern; duplicate data freely.",
+        "**Cassandra:** PRIMARY KEY ((partition key), clustering cols). Partition = unit of distribution; keep partitions < ~100 MB; bucket by time to avoid unbounded partitions: `((chat_id, month), ts)`.",
+        "**DynamoDB:** partition key + sort key; GSIs for alternate access; single-table design with overloaded keys (`PK=USER#42`, `SK=ORDER#2026-10-29`).",
+        "**MongoDB:** embed when data is read together and bounded; reference when unbounded or shared.",
+        "Hot partitions are the #1 NoSQL failure: spread writes with high-cardinality keys or write sharding."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "oltp-olap",
+     "title": "OLTP vs OLAP and the data pipeline",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "OLTP (Postgres, MySQL)",
+         "pros": [
+          "Row-oriented, fast point reads/writes",
+          "Transactions"
+         ],
+         "cons": [
+          "Slow full-table aggregates"
+         ]
+        },
+        {
+         "title": "OLAP (ClickHouse, BigQuery, Snowflake)",
+         "pros": [
+          "Columnar, compressed, vectorized scans",
+          "Aggregates over billions of rows"
+         ],
+         "cons": [
+          "Slow single-row updates"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Typical flow: OLTP → CDC (Debezium) → Kafka → stream processor / batch ETL → warehouse + lake (Parquet on S3) → BI and ML."
+      }
+     ]
+    },
+    {
+     "id": "connections",
+     "title": "Connections, pooling and N+1",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Postgres uses a process per connection; thousands of app instances need PgBouncer/RDS Proxy in transaction mode.",
+        "N+1 queries: loading 50 posts then querying the author for each → batch (`WHERE id IN`) or join; DataLoader pattern in GraphQL.",
+        "Long transactions hold locks and block vacuum; keep transactions short, never wait on network calls inside them.",
+        "Pagination: keyset (`WHERE created_at < ? ORDER BY created_at DESC LIMIT 20`) beats OFFSET for deep pages."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "SQL or NoSQL for an order system?",
+         "a": "SQL: orders need transactions across order, items, payment status; scale with read replicas and shard by customer_id when needed."
+        },
+        {
+         "q": "Why is my query slow even with an index?",
+         "a": "Wrong column order, function on the column, low selectivity, stale stats, or the planner chose a scan; check EXPLAIN ANALYZE."
+        },
+        {
+         "q": "How do you add a column to a 2 billion row table safely?",
+         "a": "Online schema change (gh-ost/pt-online-schema-change, or Postgres ADD COLUMN with default is metadata-only in v11+), expand-contract migrations."
+        },
+        {
+         "q": "Wide-column partition is growing forever. Fix?",
+         "a": "Add a time bucket to the partition key and query across buckets."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "replication",
+   "title": "Replication",
+   "category": "Data",
+   "summary": "Copies for availability and read scale; leader-follower, multi-leader or leaderless, each with its own lag and conflict story.",
+   "sections": [
+    {
+     "id": "topologies",
+     "title": "Topologies",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Writes",
+          "kind": "client"
+         }
+        ],
+        [
+         {
+          "label": "Leader",
+          "kind": "db",
+          "sub": "accepts writes"
+         }
+        ],
+        [
+         {
+          "label": "Follower",
+          "kind": "db",
+          "sub": "reads"
+         },
+         {
+          "label": "Follower",
+          "kind": "db",
+          "sub": "reads"
+         },
+         {
+          "label": "Follower (other AZ)",
+          "kind": "db",
+          "sub": "failover"
+         }
+        ]
+       ],
+       "caption": "Single-leader: writes to one node, streamed to followers"
+      },
+      {
+       "t": "table",
+       "head": [
+        "Topology",
+        "Strength",
+        "Weakness"
+       ],
+       "rows": [
+        [
+         "Single leader",
+         "Simple, no write conflicts",
+         "Leader is write bottleneck; replica lag"
+        ],
+        [
+         "Multi-leader",
+         "Local writes per region",
+         "Conflicts (LWW, CRDTs, app merge)"
+        ],
+        [
+         "Leaderless (Dynamo)",
+         "Highly available writes",
+         "Quorums W + R > N; read repair; sloppy quorum"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "sync",
+     "title": "Sync vs async",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Synchronous**: leader waits for follower ack. No data loss, higher latency, a slow follower blocks writes.",
+        "**Asynchronous**: faster, but failover can lose recent writes.",
+        "**Semi-sync**: wait for one follower, rest async. Common production compromise."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "lag",
+     "title": "Replica lag anomalies",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Anomaly",
+        "Fix"
+       ],
+       "rows": [
+        [
+         "User doesn't see their own write",
+         "Read-your-writes: read from leader for ~N s after a write, or track the write's log position"
+        ],
+        [
+         "Data appears then disappears on refresh",
+         "Monotonic reads: pin user to one replica"
+        ],
+        [
+         "Reply visible before its question",
+         "Consistent prefix: keep causally related writes in one partition"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "Failover can produce split brain: two leaders accepting writes. Use fencing and a consensus-based election."
+      }
+     ]
+    },
+    {
+     "id": "mechanics",
+     "title": "How replication actually works",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Method",
+        "Ships",
+        "Notes"
+       ],
+       "rows": [
+        [
+         "Statement-based",
+         "SQL statements",
+         "Non-deterministic functions break it (NOW(), RAND())"
+        ],
+        [
+         "WAL / physical shipping",
+         "Byte-level page changes",
+         "Exact copy; same DB version required (Postgres streaming)"
+        ],
+        [
+         "Logical / row-based",
+         "Row changes (binlog row format)",
+         "Cross-version, feeds CDC consumers"
+        ],
+        [
+         "Trigger-based",
+         "App-level copies",
+         "Flexible, slow"
+        ]
+       ]
+      },
+      {
+       "t": "list",
+       "items": [
+        "Replica lag = how far the follower's applied position trails the leader's; monitor in seconds and bytes.",
+        "Failover: detect leader failure (heartbeats), elect the most up-to-date follower, repoint clients, fence the old leader."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "quorums",
+     "title": "Leaderless quorums",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "N replicas; write to W, read from R. If W + R > N, read and write sets overlap → at least one replica has the latest value.",
+        "N=3, W=2, R=2: tolerates 1 failure for both reads and writes.",
+        "**Read repair:** reader notices a stale replica and fixes it. **Anti-entropy:** background Merkle-tree comparison.",
+        "**Hinted handoff / sloppy quorum:** another node accepts writes for a down node and hands them back later — more available, weaker guarantee.",
+        "Conflicts from concurrent writes: last-write-wins (lossy), vector clocks + app merge, or CRDTs."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "conflicts",
+     "title": "Multi-leader conflict resolution",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Strategy",
+        "How",
+        "Risk"
+       ],
+       "rows": [
+        [
+         "Last-writer-wins",
+         "Highest timestamp wins",
+         "Silently drops writes; clock skew"
+        ],
+        [
+         "Per-record home region",
+         "Each record writable in one region",
+         "Cross-region writes slower"
+        ],
+        [
+         "CRDTs",
+         "Data types that merge (counters, sets, sequences)",
+         "Limited data types, metadata growth"
+        ],
+        [
+         "Application merge",
+         "Store siblings, merge on read",
+         "Complexity in the app"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "geo",
+     "title": "Cross-region replication",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Async cross-region replication: RPO = replication lag (seconds); sync cross-region adds 50–200 ms per write.",
+        "Read-local / write-home: route writes to the record's home region, read from local replica, use read-your-writes tokens.",
+        "Global databases (Spanner, CockroachDB, Aurora Global, DynamoDB Global Tables) package these trade-offs."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "User updates profile then refreshes and sees the old one. Why and fix?",
+         "a": "Read went to a lagging replica. Read from the leader for that user for a short window, or pass the write's LSN and wait for a replica that has it."
+        },
+        {
+         "q": "What's split brain and how do you prevent it?",
+         "a": "Two nodes both accept writes as leader. Use consensus-based election with a majority and fence the old leader (STONITH, fencing tokens, revoking its lease)."
+        },
+        {
+         "q": "Sync or async replication for payments?",
+         "a": "Synchronous (or semi-sync to at least one replica / quorum commit) so an acknowledged payment survives leader loss."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "sharding",
+   "title": "Sharding & Consistent Hashing",
+   "category": "Data",
+   "summary": "Partition data when one node can't take the writes or hold the data; the shard key decides everything.",
+   "sections": [
+    {
+     "id": "strategies",
+     "title": "Strategies",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Strategy",
+        "Good",
+        "Bad"
+       ],
+       "rows": [
+        [
+         "Range (A–F, G–M)",
+         "Range scans",
+         "Hot spots on sequential keys"
+        ],
+        [
+         "Hash mod N",
+         "Even spread",
+         "Resharding moves almost every key"
+        ],
+        [
+         "Consistent hashing",
+         "Adding a node moves ~1/N keys",
+         "Needs virtual nodes"
+        ],
+        [
+         "Directory lookup",
+         "Flexible placement",
+         "Lookup service dependency"
+        ],
+        [
+         "Geo / tenant",
+         "Locality, isolation",
+         "Uneven tenant sizes"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "key",
+     "title": "Choosing the shard key",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "High cardinality and even distribution of **both** reads and writes.",
+        "Matches the hottest query so it hits one shard.",
+        "Examples: messages by channel_id, orders by customer_id, URLs by short code."
+       ],
+       "ordered": false
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "Sharding by created_at sends all new writes to one shard. Sharding by country puts India on one overloaded node."
+      }
+     ]
+    },
+    {
+     "id": "ring",
+     "title": "Consistent hashing",
+     "blocks": [
+      {
+       "t": "ring"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Nodes and keys hash onto a ring (0 … 2^32). A key belongs to the next node clockwise.",
+        "Adding/removing a node only moves keys in one arc, ~1/N of data.",
+        "**Virtual nodes** (100–200 per server) even out load and allow weighted capacity.",
+        "Used by DynamoDB, Cassandra, Memcached clients, CDN routing."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "problems",
+     "title": "Problems sharding creates",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Problem",
+        "Answer"
+       ],
+       "rows": [
+        [
+         "Cross-shard joins",
+         "Denormalize or join in the app"
+        ],
+        [
+         "Cross-shard transactions",
+         "Avoid; saga or 2PC when unavoidable"
+        ],
+        [
+         "Global secondary index",
+         "Scatter-gather, or a separate index table keyed by the attribute"
+        ],
+        [
+         "Hot shard (celebrity)",
+         "Split key with random suffix, cache in front"
+        ],
+        [
+         "Resharding",
+         "Pre-split into many logical shards mapped to fewer physical nodes"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "I'll shard by channel_id so one channel's messages live together, and pre-split into 1,024 logical shards so we can rebalance without rehashing."
+      }
+     ]
+    },
+    {
+     "id": "rebalancing",
+     "title": "Rebalancing without pain",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Fixed many partitions:** create 1,024–4,096 logical shards upfront; move whole shards between nodes (Elasticsearch, Couchbase, Vitess keyspace ranges).",
+        "**Dynamic splitting:** split a range when it grows past a size (HBase, DynamoDB, CockroachDB).",
+        "**Consistent hashing with vnodes:** adding a node steals small ranges from many nodes.",
+        "Move data online: dual-write or stream changes, backfill, verify, cut over routing, delete old copy."
+       ]
+      },
+      {
+       "t": "steps",
+       "items": [
+        {
+         "title": "Backfill",
+         "text": "Copy the shard snapshot to the new node."
+        },
+        {
+         "title": "Catch up",
+         "text": "Stream changes since the snapshot (CDC)."
+        },
+        {
+         "title": "Cut over",
+         "text": "Briefly pause writes or use routing version, switch the directory."
+        },
+        {
+         "title": "Clean up",
+         "text": "Delete the old copy after verification."
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "routing",
+     "title": "Routing requests to shards",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Approach",
+        "Example"
+       ],
+       "rows": [
+        [
+         "Client-aware",
+         "Cassandra drivers know the token ring"
+        ],
+        [
+         "Proxy / router",
+         "Vitess vtgate, MongoDB mongos"
+        ],
+        [
+         "Directory service",
+         "Lookup table cached in clients"
+        ],
+        [
+         "Any node forwards",
+         "Gossip-based (Cassandra coordinator)"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "ring-deep",
+     "title": "Consistent hashing variants",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Ring + virtual nodes:** classic; O(log V) lookup with sorted tokens.",
+        "**Rendezvous (HRW) hashing:** score = hash(key, node) for every node, pick max — no ring, minimal movement, O(N) per lookup.",
+        "**Jump consistent hash:** tiny, fast, perfect balance, but nodes only appended/removed at the end.",
+        "**Bounded-load consistent hashing:** cap each node at (1+ε)× average to stop hot spots (used by Vimeo, Google).",
+        "**Maglev:** lookup table for LBs with fast lookup and minimal disruption."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "cross-shard",
+     "title": "Cross-shard queries and global uniqueness",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Secondary-index lookups: local indexes (query every shard — scatter-gather) vs global index table partitioned by the indexed column (extra write).",
+        "Aggregates: compute per shard, merge centrally; or stream to an OLAP store.",
+        "Global unique constraint (username): a separate table sharded by username, written with the user record in a saga or 2PC.",
+        "IDs that embed the shard (Instagram's ID: time + shard id + sequence) route lookups without a directory."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "When do you shard?",
+         "a": "When a single primary can't handle write throughput or the data no longer fits (after vertical scaling, read replicas and caching)."
+        },
+        {
+         "q": "Pick a shard key for a multi-tenant SaaS.",
+         "a": "tenant_id keeps tenant data together and isolated; split very large tenants across multiple shards (tenant_id + sub-key)."
+        },
+        {
+         "q": "Resharding from 8 to 16 with mod N?",
+         "a": "Almost all keys move. Instead pre-split into many logical shards or use consistent hashing; migrate with dual writes and backfill."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "storage-engines",
+   "category": "Data",
+   "title": "Storage Engines: B-Trees, LSM & Columnar",
+   "summary": "Why Postgres, Cassandra and ClickHouse behave so differently: B-tree vs LSM-tree write paths, write-ahead logs, compaction, and row vs column layouts for OLTP vs analytics.",
+   "sections": [
+    {
+     "id": "wal",
+     "title": "Write-ahead log",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "Every serious database appends a change to a sequential log and fsyncs it before acknowledging the write, then updates data structures lazily. After a crash, replay the log. The WAL is also what replication ships to followers."
+      }
+     ]
+    },
+    {
+     "id": "btree-lsm",
+     "title": "B-tree vs LSM-tree",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "B-tree (Postgres, MySQL InnoDB)",
+         "pros": [
+          "Reads: O(log n) page lookups, predictable",
+          "Good for read-heavy OLTP and range scans"
+         ],
+         "cons": [
+          "Random in-place page writes; write amplification from page splits"
+         ]
+        },
+        {
+         "title": "LSM-tree (Cassandra, RocksDB, DynamoDB storage)",
+         "pros": [
+          "Writes: append to memtable + log — very fast, sequential",
+          "Great for write-heavy workloads"
+         ],
+         "cons": [
+          "Reads may check several SSTables (Bloom filters help)",
+          "Background compaction costs I/O"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "Write-heavy, append-mostly data (events, messages, metrics) points to an LSM engine; read-heavy relational data with transactions points to a B-tree engine."
+      }
+     ]
+    },
+    {
+     "id": "lsm",
+     "title": "LSM write path",
+     "blocks": [
+      {
+       "t": "steps",
+       "items": [
+        {
+         "title": "Commit log",
+         "text": "Append for durability."
+        },
+        {
+         "title": "Memtable",
+         "text": "Sorted in-memory structure (skip list)."
+        },
+        {
+         "title": "Flush",
+         "text": "When full, write an immutable sorted SSTable."
+        },
+        {
+         "title": "Compaction",
+         "text": "Merge SSTables, drop overwritten values and expired tombstones (size-tiered vs leveled)."
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "columnar",
+     "title": "Row vs columnar",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Row store (OLTP)",
+         "pros": [
+          "Fetch/update a whole row fast",
+          "Transactions"
+         ],
+         "cons": [
+          "Scanning one column across a billion rows reads everything"
+         ]
+        },
+        {
+         "title": "Column store (OLAP: ClickHouse, BigQuery, Parquet)",
+         "pros": [
+          "Read only the columns a query needs",
+          "Great compression (similar values together)",
+          "Vectorised execution"
+         ],
+         "cons": [
+          "Slow single-row updates"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Typical architecture: OLTP database for the product, CDC into a columnar warehouse for analytics."
+      }
+     ]
+    },
+    {
+     "id": "amplification",
+     "title": "Amplification trade-offs",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "",
+        "B-tree",
+        "LSM (leveled)"
+       ],
+       "rows": [
+        [
+         "Write amplification",
+         "Medium–high",
+         "High (compaction rewrites)"
+        ],
+        [
+         "Read amplification",
+         "Low",
+         "Medium (multiple levels)"
+        ],
+        [
+         "Space amplification",
+         "Medium (fragmentation)",
+         "Low–medium"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "questions",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Why are LSM deletes tricky?",
+         "a": "A delete is a tombstone; until compaction removes older versions everywhere, the tombstone must persist or data resurrects."
+        },
+        {
+         "q": "What is a covering index?",
+         "a": "An index that contains every column a query needs, so the table itself isn't read."
+        },
+        {
+         "q": "Why is Parquet used in data lakes?",
+         "a": "Columnar, compressed, splittable files with schema — cheap scans of a few columns."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "consistency",
+   "title": "CAP, PACELC & Consistency",
+   "category": "Consistency",
+   "summary": "Decide per piece of data how stale it may be; say CP or AP with a concrete reason.",
+   "sections": [
+    {
+     "id": "cap",
+     "title": "CAP and PACELC",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "During a network **partition** a system chooses **consistency** (reject or block some requests) or **availability** (answer, maybe stale). PACELC adds: **else**, choose **latency** or **consistency**."
+      },
+      {
+       "t": "table",
+       "head": [
+        "System",
+        "PACELC"
+       ],
+       "rows": [
+        [
+         "DynamoDB, Cassandra",
+         "PA / EL"
+        ],
+        [
+         "Spanner, HBase, etcd",
+         "PC / EC"
+        ],
+        [
+         "MongoDB (majority)",
+         "PC / EC"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "For the ledger I choose CP: I'd rather reject a transfer than double-spend. For like counts, AP: a few seconds stale is fine."
+      }
+     ]
+    },
+    {
+     "id": "models",
+     "title": "Consistency models",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Model",
+        "Guarantee",
+        "Example"
+       ],
+       "rows": [
+        [
+         "Linearizable",
+         "Reads see the latest write, real-time order",
+         "Balances, locks"
+        ],
+        [
+         "Sequential",
+         "Everyone sees the same order",
+         "Replicated log"
+        ],
+        [
+         "Causal",
+         "Cause before effect",
+         "Replies after messages"
+        ],
+        [
+         "Read-your-writes",
+         "You see your own updates",
+         "Profile edits"
+        ],
+        [
+         "Monotonic reads",
+         "Never go back in time",
+         "Feed pagination"
+        ],
+        [
+         "Eventual",
+         "Converges when writes stop",
+         "Counters, DNS"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "cap-deep",
+     "title": "CAP done carefully",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "CAP's C is **linearizability**, A means every non-failing node answers; P (partitions) will happen, so the real choice is during a partition.",
+        "Most systems aren't purely CP or AP: they choose per operation (DynamoDB strongly consistent reads vs eventual reads; Cassandra QUORUM vs ONE).",
+        "PACELC is more useful day to day: even without partitions, strong consistency costs latency (cross-AZ round trips)."
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "key",
+       "title": "Key idea",
+       "text": "Choose consistency per data type and per operation, not per system."
+      }
+     ]
+    },
+    {
+     "id": "session-guarantees",
+     "title": "Session guarantees",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Guarantee",
+        "Means",
+        "How to provide"
+       ],
+       "rows": [
+        [
+         "Read-your-writes",
+         "See your own writes",
+         "Read from leader / sticky replica / wait for LSN"
+        ],
+        [
+         "Monotonic reads",
+         "Never go back in time",
+         "Pin user to a replica"
+        ],
+        [
+         "Monotonic writes",
+         "Your writes apply in order",
+         "Single leader per key"
+        ],
+        [
+         "Writes-follow-reads",
+         "A reply is ordered after what you read",
+         "Causal metadata (version vectors)"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "linearizability",
+     "title": "Linearizability vs serializability",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Linearizability",
+         "pros": [
+          "Single-object recency: behaves like one copy in real time"
+         ],
+         "cons": [
+          "Needs consensus or single leader; cross-region latency"
+         ]
+        },
+        {
+         "title": "Serializability",
+         "pros": [
+          "Multi-object transactions behave as if run one by one"
+         ],
+         "cons": [
+          "Not necessarily real-time order"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Strict serializability = both (Spanner). In interviews: 'linearizable' for a lock or a counter you read immediately; 'serializable' for transaction isolation."
+      }
+     ]
+    },
+    {
+     "id": "eventual",
+     "title": "Living with eventual consistency",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Make operations commutative/idempotent so order doesn't matter (counters, sets, CRDTs).",
+        "Show pending states in the UI (optimistic updates with reconciliation).",
+        "Use compensations instead of rollbacks (sagas).",
+        "Monitor and bound staleness (replication lag SLO)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Is DynamoDB CP or AP?",
+         "a": "Configurable per read: eventually consistent reads (AP-ish, cheaper) or strongly consistent reads from the leader replica; global tables are multi-region last-writer-wins."
+        },
+        {
+         "q": "Where do you need strong consistency in an e-commerce site?",
+         "a": "Payments, inventory decrement for the last items, order state transitions, unique coupon redemption."
+        },
+        {
+         "q": "How would you build a 'likes' counter?",
+         "a": "Eventually consistent: increment in a sharded counter or via event aggregation; exact count not needed instantly."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "transactions-locks",
+   "title": "Transactions & Locks",
+   "category": "Consistency",
+   "summary": "Isolation levels, optimistic vs pessimistic locking, and distributed locks with fencing tokens.",
+   "sections": [
+    {
+     "id": "isolation",
+     "title": "Isolation levels",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Level",
+        "Prevents",
+        "Still allows"
+       ],
+       "rows": [
+        [
+         "Read uncommitted",
+         "—",
+         "Dirty reads"
+        ],
+        [
+         "Read committed (Postgres default)",
+         "Dirty reads",
+         "Non-repeatable reads, lost updates"
+        ],
+        [
+         "Repeatable read / snapshot (MySQL default)",
+         "Non-repeatable reads",
+         "Write skew"
+        ],
+        [
+         "Serializable",
+         "All anomalies",
+         "Throughput loss, retries"
+        ]
+       ]
+      },
+      {
+       "t": "p",
+       "text": "**MVCC** gives each transaction a snapshot so readers never block writers. **Write skew**: two doctors each check 'someone else is on call' and both go off call. Only serializable or explicit locks stop it."
+      }
+     ]
+    },
+    {
+     "id": "locking",
+     "title": "Optimistic vs pessimistic",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Pessimistic",
+         "pros": [
+          "No retries",
+          "Right for high contention (last seat, hot inventory)"
+         ],
+         "cons": [
+          "Blocks others",
+          "Deadlock risk: lock in a fixed order, set timeouts"
+         ]
+        },
+        {
+         "title": "Optimistic",
+         "pros": [
+          "No locks held",
+          "Great when conflicts are rare"
+         ],
+         "cons": [
+          "Retries under contention",
+          "Needs a version column"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "code",
+       "lang": "sql",
+       "text": "-- pessimistic\nBEGIN;\nSELECT * FROM seats WHERE id = 42 FOR UPDATE;\nUPDATE seats SET status = 'HELD', user_id = 7 WHERE id = 42;\nCOMMIT;\n\n-- optimistic\nUPDATE docs SET body = ?, version = version + 1\nWHERE id = ? AND version = ?;   -- 0 rows => conflict, retry\n\n-- atomic, no read-modify-write race\nUPDATE stock SET qty = qty - 1 WHERE sku = ? AND qty > 0;"
+      }
+     ]
+    },
+    {
+     "id": "distlock",
+     "title": "Distributed locks",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Worker A",
+          "kind": "service"
+         },
+         {
+          "label": "Worker B",
+          "kind": "service"
+         }
+        ],
+        [
+         {
+          "label": "Lock service",
+          "kind": "cache",
+          "sub": "Redis / etcd / ZooKeeper"
+         }
+        ],
+        [
+         {
+          "label": "Storage",
+          "kind": "db",
+          "sub": "rejects stale fencing tokens"
+         }
+        ]
+       ],
+       "caption": "Lock + fencing token = safe for correctness"
+      },
+      {
+       "t": "list",
+       "items": [
+        "**Redis**: `SET lock:x <uuid> NX PX 30000`; release with Lua compare-and-delete. Fast, fine for efficiency (avoid duplicate work).",
+        "**The failure**: a GC pause outlives the TTL; two holders act at once.",
+        "**Fencing token**: lock grants an increasing number; storage rejects writes with an older token.",
+        "**Correctness locks**: etcd leases or ZooKeeper ephemeral sequential znodes (built on consensus).",
+        "**DB-native**: unique constraints, `FOR UPDATE SKIP LOCKED` job queues, advisory locks."
+       ],
+       "ordered": false
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "A Redis lock is fine to avoid duplicate work. If correctness depends on it, I'd add fencing tokens or use etcd."
+      }
+     ]
+    },
+    {
+     "id": "dtx",
+     "title": "Distributed transactions",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Approach",
+        "How",
+        "Trade-off"
+       ],
+       "rows": [
+        [
+         "2PC",
+         "Coordinator: prepare all, then commit",
+         "Atomic but blocking if coordinator dies"
+        ],
+        [
+         "Saga",
+         "Local steps + compensations",
+         "Eventually consistent, no global lock"
+        ],
+        [
+         "TCC",
+         "Try (reserve) → Confirm / Cancel",
+         "Common in payments; more API surface"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "anomalies",
+     "title": "Anomalies you must name",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Anomaly",
+        "Example",
+        "Prevented by"
+       ],
+       "rows": [
+        [
+         "Dirty read",
+         "Read uncommitted value that rolls back",
+         "Read committed"
+        ],
+        [
+         "Non-repeatable read",
+         "Same row read twice, different values",
+         "Repeatable read / snapshot"
+        ],
+        [
+         "Phantom",
+         "Range query returns new rows the second time",
+         "Serializable (predicate / next-key locks)"
+        ],
+        [
+         "Lost update",
+         "Two read-modify-write cycles overwrite",
+         "Atomic ops, SELECT FOR UPDATE, optimistic versions"
+        ],
+        [
+         "Write skew",
+         "Two doctors both go off call",
+         "Serializable, or lock the rows you check (FOR UPDATE)"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "implementations",
+     "title": "How isolation is implemented",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**2PL (two-phase locking):** shared/exclusive locks held to commit; serializable but blocks and deadlocks.",
+        "**MVCC snapshot isolation:** readers don't block writers; first-committer-wins on write conflicts.",
+        "**SSI (serializable snapshot isolation, Postgres SERIALIZABLE):** tracks read/write dependencies and aborts dangerous ones; retry on serialization failure.",
+        "**Next-key / gap locks (InnoDB):** lock index ranges to prevent phantoms in REPEATABLE READ."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "deadlocks",
+     "title": "Deadlocks and lock design",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Deadlock: T1 holds A wants B, T2 holds B wants A. DB detects the cycle and aborts one — the app must retry.",
+        "Prevent: lock in a consistent order (sort IDs), keep transactions short, use lock timeouts.",
+        "Hot rows (one inventory row for a flash sale) serialize all buyers: split the counter (N sub-rows), or move the counter to Redis with an async ledger.",
+        "`SKIP LOCKED` turns a table into a job queue: workers grab unlocked rows without waiting."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "distlock-deep",
+     "title": "Distributed locks in depth",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Option",
+        "Correct under pauses?",
+        "Notes"
+       ],
+       "rows": [
+        [
+         "Redis SET NX PX (single node)",
+         "No, without fencing",
+         "Fast; good for efficiency"
+        ],
+        [
+         "Redlock (5 nodes)",
+         "Debated",
+         "Assumes bounded clock drift"
+        ],
+        [
+         "ZooKeeper ephemeral sequential znode",
+         "Yes with fencing (zxid)",
+         "Session expiry releases lock"
+        ],
+        [
+         "etcd lease + revision",
+         "Yes with fencing (revision)",
+         "Kubernetes leader election uses it"
+        ],
+        [
+         "DB row lock / advisory lock",
+         "Yes within DB",
+         "Simple if you already have the DB"
+        ]
+       ]
+      },
+      {
+       "t": "code",
+       "lang": "text",
+       "text": "Fencing:\n lock service grants token 33 to A; A pauses (GC); lease expires\n B gets token 34 and writes with 34; storage remembers max=34\n A wakes, writes with 33 → storage rejects (33 < 34)"
+      }
+     ]
+    },
+    {
+     "id": "dtx-deep",
+     "title": "Distributed transactions in depth",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**2PC:** prepare (participants vote and hold locks) → commit/abort. Blocking if coordinator fails after prepare; XA in Java EE; used inside databases (Spanner uses 2PC over Paxos groups).",
+        "**Saga:** local transactions + compensations; must handle out-of-order and duplicate messages; semantic locks (status = PENDING) prevent dirty reads of in-flight sagas.",
+        "**TCC:** Try reserves (hold funds), Confirm commits, Cancel releases; reservations expire.",
+        "**Outbox + idempotent consumers:** the practical backbone of sagas."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Two users book the last seat. Walk through it.",
+         "a": "Seat row `status=FREE`. `UPDATE seats SET status='HELD', user=? , hold_until=now()+10m WHERE id=? AND status='FREE'`; 1 row updated = success, 0 = taken. Payment then confirms; expired holds are released by a job."
+        },
+        {
+         "q": "Optimistic or pessimistic for a wiki?",
+         "a": "Optimistic with version numbers; conflicts are rare and you can show a merge screen."
+        },
+        {
+         "q": "Why not just use a Redis lock for payments?",
+         "a": "A lock can expire while the holder still runs; use DB transactions/constraints and idempotency keys; if a lock is used, add fencing tokens."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "consensus",
+   "title": "Consensus & Leader Election",
+   "category": "Consistency",
+   "summary": "Raft and Paxos let a majority agree on one ordered log; the basis of etcd, ZooKeeper and Kafka KRaft.",
+   "sections": [
+    {
+     "id": "raft",
+     "title": "Raft in five lines",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Nodes are follower, candidate or leader; a follower that hears no heartbeat times out (randomized) and runs for leader.",
+        "A candidate wins with votes from a majority for that term.",
+        "The leader appends client commands to its log and replicates them.",
+        "An entry is committed once a majority stores it; then it is applied.",
+        "Tolerates ⌊(N−1)/2⌋ failures: 3 nodes survive 1, 5 survive 2."
+       ],
+       "ordered": true
+      }
+     ]
+    },
+    {
+     "id": "uses",
+     "title": "Where it shows up",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Use",
+        "Tool"
+       ],
+       "rows": [
+        [
+         "Config + service discovery",
+         "etcd, Consul"
+        ],
+        [
+         "Leader election, locks",
+         "ZooKeeper, etcd"
+        ],
+        [
+         "Kafka metadata",
+         "KRaft"
+        ],
+        [
+         "Distributed SQL",
+         "CockroachDB, Spanner (Paxos), TiDB"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "Even node counts add no fault tolerance: 4 nodes still survive only 1 failure. Use 3 or 5."
+      }
+     ]
+    },
+    {
+     "id": "time",
+     "title": "Clocks and ordering",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "Wall clocks drift, so never order events across machines by timestamp alone. **Lamport clocks** give a causal total order, **vector clocks** detect concurrent writes, **hybrid logical clocks** mix both, and Spanner's **TrueTime** waits out clock uncertainty."
+      }
+     ]
+    },
+    {
+     "id": "raft-deep",
+     "title": "Raft in detail",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Terms:** logical clock; each election starts a new term; stale leaders step down when they see a higher term.",
+        "**Election:** follower times out (150–300 ms randomized), becomes candidate, votes for itself, requests votes; a node votes once per term and only for candidates whose log is at least as up to date.",
+        "**Log replication:** leader appends entry, sends AppendEntries; once a majority store it, it's committed and applied to the state machine.",
+        "**Log matching:** each entry carries (term, index); followers reject mismatches and the leader backs up until logs agree.",
+        "**Safety:** a committed entry is in every future leader's log (election restriction).",
+        "**Snapshots** compact the log; **membership changes** via joint consensus or one-at-a-time."
+       ]
+      },
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Client",
+          "kind": "client"
+         }
+        ],
+        [
+         {
+          "label": "Leader",
+          "kind": "service",
+          "sub": "term 7"
+         }
+        ],
+        [
+         {
+          "label": "Follower",
+          "kind": "service"
+         },
+         {
+          "label": "Follower",
+          "kind": "service"
+         },
+         {
+          "label": "Follower",
+          "kind": "service"
+         },
+         {
+          "label": "Follower",
+          "kind": "service"
+         }
+        ]
+       ],
+       "caption": "Writes go through the leader to a majority"
+      }
+     ]
+    },
+    {
+     "id": "paxos",
+     "title": "Paxos, ZAB and friends",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Protocol",
+        "Used by",
+        "Note"
+       ],
+       "rows": [
+        [
+         "Paxos / Multi-Paxos",
+         "Chubby, Spanner",
+         "Proposers, acceptors, learners; leader optimisation = Multi-Paxos"
+        ],
+        [
+         "Raft",
+         "etcd, Consul, CockroachDB, TiKV, Kafka KRaft",
+         "Designed for understandability"
+        ],
+        [
+         "ZAB",
+         "ZooKeeper",
+         "Primary-backup atomic broadcast"
+        ],
+        [
+         "PBFT / HotStuff",
+         "Blockchains",
+         "Byzantine fault tolerance, 3f+1 nodes"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "uses-deep",
+     "title": "What consensus is for",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Leader election (one scheduler, one primary DB).",
+        "Distributed locks and leases with fencing.",
+        "Configuration and service discovery (etcd, Consul).",
+        "Replicated state machines (each Raft group owns a range in CockroachDB/TiKV).",
+        "Atomic commit across shards (Spanner: 2PC across Paxos groups)."
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "Consensus is slow per operation (majority round trip, fsync). Keep it for metadata and coordination, not every user write — unless the database is built on it."
+      }
+     ]
+    },
+    {
+     "id": "failure-math",
+     "title": "Failure math",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Cluster size",
+        "Majority",
+        "Failures tolerated"
+       ],
+       "rows": [
+        [
+         "3",
+         "2",
+         "1"
+        ],
+        [
+         "4",
+         "3",
+         "1"
+        ],
+        [
+         "5",
+         "3",
+         "2"
+        ],
+        [
+         "7",
+         "4",
+         "3"
+        ]
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Across 3 AZs, run 3 or 5 nodes so losing an AZ still leaves a majority."
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Why randomized election timeouts?",
+         "a": "To avoid split votes where several candidates start at once and nobody wins."
+        },
+        {
+         "q": "Can a Raft leader serve reads locally?",
+         "a": "Only safely if it confirms it's still leader (read index with a heartbeat round, or leader leases with bounded clock drift)."
+        },
+        {
+         "q": "What happens during a network partition with 5 nodes split 3/2?",
+         "a": "The side with 3 can elect a leader and commit; the 2-node side can't make progress — that's CP behaviour."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "quorums-gossip",
+   "category": "Consistency",
+   "title": "Quorums, Gossip & Failure Detection",
+   "summary": "The primitives behind leaderless databases and cluster membership: R + W > N quorums, sloppy quorums and hinted handoff, vector clocks, Merkle-tree anti-entropy, heartbeats, leases and gossip.",
+   "sections": [
+    {
+     "id": "quorum",
+     "title": "Quorum reads and writes",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Config (N=3)",
+        "Behaviour"
+       ],
+       "rows": [
+        [
+         "W=3, R=1",
+         "Fast reads, slow/fragile writes"
+        ],
+        [
+         "W=2, R=2",
+         "Balanced; tolerates one replica down"
+        ],
+        [
+         "W=1, R=3",
+         "Fast writes, slow reads"
+        ],
+        [
+         "W=1, R=1",
+         "Fastest; no overlap → stale reads possible"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "key",
+       "title": "Key insight",
+       "text": "If R + W > N, every read set overlaps every write set, so a read sees at least one copy of the latest acknowledged write."
+      }
+     ]
+    },
+    {
+     "id": "sloppy",
+     "title": "Sloppy quorum and hinted handoff",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "When the key's home replicas are unreachable, accept the write on other nodes with a 'hint' naming the intended owner, and hand it off when the owner returns. This keeps writes available during partitions at the cost of weaker consistency."
+      }
+     ]
+    },
+    {
+     "id": "conflicts",
+     "title": "Detecting conflicts",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Last-write-wins (timestamps)",
+         "pros": [
+          "Simple, no siblings"
+         ],
+         "cons": [
+          "Silently drops concurrent writes; depends on clocks"
+         ]
+        },
+        {
+         "title": "Vector clocks / version vectors",
+         "pros": [
+          "Detect true concurrency; client merges siblings"
+         ],
+         "cons": [
+          "Metadata grows; app must merge"
+         ]
+        },
+        {
+         "title": "CRDTs",
+         "pros": [
+          "Merge automatically and correctly (counters, sets)"
+         ],
+         "cons": [
+          "Only for data types that have a CRDT"
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "antientropy",
+     "title": "Anti-entropy with Merkle trees",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "Each replica builds a hash tree over its key ranges. Two replicas compare root hashes; if they differ, recurse only into differing children. Divergent ranges are found with O(log n) comparisons and only those keys are synced."
+      }
+     ]
+    },
+    {
+     "id": "membership",
+     "title": "Heartbeats, gossip and leases",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Heartbeats:** periodic 'I'm alive' messages; missing k in a row → suspect.",
+        "**Gossip:** every second each node exchanges its membership table with a few random peers; information spreads to all nodes in O(log n) rounds — no central coordinator (Cassandra, Consul/Serf).",
+        "**Phi-accrual detector:** outputs a suspicion level from inter-arrival times instead of a fixed timeout.",
+        "**Leases:** time-bounded ownership (e.g. leader lease). Pair with **fencing tokens** so a paused old owner can't corrupt state."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "questions",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Why add fencing tokens to a lease?",
+         "a": "A GC pause can outlive the lease; storage rejects writes with a token older than the latest one issued."
+        },
+        {
+         "q": "Is a quorum system linearizable?",
+         "a": "Not automatically — concurrent writes, sloppy quorums and LWW clocks break it; linearizability needs consensus or read-repair with extra rules."
+        },
+        {
+         "q": "How fast does gossip converge?",
+         "a": "Roughly log_fanout(N) rounds — a 1,000-node cluster in a handful of seconds."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "queues-kafka",
+   "title": "Queues & Kafka",
+   "category": "Async",
+   "summary": "Decouple with queues for jobs and logs for events; know partitions, consumer groups, ISR and delivery semantics.",
+   "sections": [
+    {
+     "id": "vs",
+     "title": "Queue vs log",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "",
+        "Queue (SQS, RabbitMQ)",
+        "Log (Kafka, Kinesis)"
+       ],
+       "rows": [
+        [
+         "After consume",
+         "Deleted on ack",
+         "Retained; offsets tracked"
+        ],
+        [
+         "Consumers",
+         "Competing workers",
+         "Many independent groups"
+        ],
+        [
+         "Replay",
+         "No",
+         "Yes"
+        ],
+        [
+         "Ordering",
+         "Best effort",
+         "Strict per partition"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "kafka",
+     "title": "Kafka internals",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Producer",
+          "kind": "service",
+          "sub": "key → partition"
+         }
+        ],
+        [
+         {
+          "label": "P0",
+          "kind": "queue",
+          "sub": "leader B1"
+         },
+         {
+          "label": "P1",
+          "kind": "queue",
+          "sub": "leader B2"
+         },
+         {
+          "label": "P2",
+          "kind": "queue",
+          "sub": "leader B3"
+         }
+        ],
+        [
+         {
+          "label": "Consumer 1",
+          "kind": "service",
+          "sub": "P0, P1"
+         },
+         {
+          "label": "Consumer 2",
+          "kind": "service",
+          "sub": "P2"
+         }
+        ]
+       ],
+       "caption": "One consumer per partition inside a group"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Partition = ordered, append-only log; hash(key) keeps one entity's events in order.",
+        "Replication factor 3, `acks=all`, `min.insync.replicas=2` → no loss on one broker failure.",
+        "ISR = replicas caught up with the leader; only they can become leader.",
+        "Max consumer parallelism = number of partitions.",
+        "Fast because of sequential I/O, page cache, zero-copy, batching, compression.",
+        "Log compaction keeps the latest value per key."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "semantics",
+     "title": "Delivery semantics",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Semantics",
+        "How",
+        "Risk"
+       ],
+       "rows": [
+        [
+         "At-most-once",
+         "Commit offset, then process",
+         "Loss"
+        ],
+        [
+         "At-least-once",
+         "Process, then commit",
+         "Duplicates → idempotent consumer"
+        ],
+        [
+         "Exactly-once",
+         "Idempotent producer + transactions",
+         "Only inside Kafka"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "I'll use at-least-once delivery with idempotent consumers keyed by event ID; that's exactly-once in effect."
+      },
+      {
+       "t": "callout",
+       "tone": "tip",
+       "title": "Tip",
+       "text": "Failed N times? Send to a dead letter queue and alert on its depth. One poison message must not block a partition."
+      }
+     ]
+    },
+    {
+     "id": "rabbit",
+     "title": "RabbitMQ, SQS and Kafka compared",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "",
+        "RabbitMQ",
+        "SQS",
+        "Kafka"
+       ],
+       "rows": [
+        [
+         "Model",
+         "Broker with exchanges → queues",
+         "Managed queue",
+         "Partitioned log"
+        ],
+        [
+         "Routing",
+         "Direct, topic, fanout, headers exchanges",
+         "None (use SNS for fan-out)",
+         "By topic + key"
+        ],
+        [
+         "Ordering",
+         "Per queue (single consumer)",
+         "FIFO queues (300–3k msg/s per group)",
+         "Per partition"
+        ],
+        [
+         "Retention",
+         "Until acked",
+         "Up to 14 days",
+         "Time/size based, replayable"
+        ],
+        [
+         "Delivery",
+         "Push with prefetch, acks",
+         "Poll, visibility timeout",
+         "Pull, offsets"
+        ],
+        [
+         "Throughput",
+         "~10k–50k msg/s per node",
+         "Nearly unlimited (standard)",
+         "Millions msg/s per cluster"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "semantics-deep",
+     "title": "Visibility timeouts, acks and poison messages",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "SQS: a received message is hidden for the visibility timeout; if not deleted it reappears → set timeout > processing time, extend for long jobs.",
+        "RabbitMQ: unacked messages are redelivered when the consumer dies; `prefetch` bounds in-flight messages per consumer.",
+        "Kafka: committing the offset is the ack; a consumer crash before commit reprocesses from the last commit.",
+        "Poison messages: count deliveries (`ApproximateReceiveCount`, x-death headers) and route to a DLQ after N attempts.",
+        "Retry topics with increasing delays (retry-1m, retry-10m) avoid blocking the main partition."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "ordering-deep",
+     "title": "Ordering guarantees",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Global order requires a single partition (throughput ceiling). Usually you need order **per entity**: key by entity ID.",
+        "Producer retries can reorder unless idempotence is on (`enable.idempotence=true`, max.in.flight ≤ 5).",
+        "Rebalances can cause duplicates; consumers dedupe by event ID or idempotent writes.",
+        "Processing in parallel inside a consumer breaks per-key order unless you parallelize by key."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "partitions-deep",
+     "title": "Choosing partitions and keys",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Partitions = max consumer parallelism. Size for peak: e.g. 200 MB/s ÷ 10 MB/s per consumer = 20 partitions, round up to 32–64.",
+        "Adding partitions later remaps keys → order breaks for in-flight keys; plan ahead.",
+        "Skewed keys create hot partitions; salt very hot keys or use a sub-key.",
+        "Consumer lag (latest offset − committed offset) is the key health metric; alert on lag growth and time-lag."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "stream-processing",
+     "title": "Stream processing",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Kafka Streams / Flink: stateful processing with local state stores backed by changelog topics.",
+        "Windows: tumbling (fixed), hopping (overlapping), sliding, session (gap-based).",
+        "Event time vs processing time; watermarks decide when a window is complete; late events go to side outputs.",
+        "Exactly-once in Flink via checkpoints (Chandy-Lamport) + transactional sinks."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Why add a queue between an API and a slow service?",
+         "a": "Absorbs spikes, decouples availability, enables retries and back-pressure; the API returns 202 Accepted with a job ID."
+        },
+        {
+         "q": "How do you guarantee order and scale?",
+         "a": "Partition by the key that needs order; parallelism across keys; one consumer per partition."
+        },
+        {
+         "q": "A consumer is 2 hours behind. What do you do?",
+         "a": "Scale consumers up to the partition count, optimize per-message work (batching), check for a poison message or hot partition, temporarily skip non-critical work."
+        },
+        {
+         "q": "Kafka or SQS for sending emails?",
+         "a": "SQS (or RabbitMQ): simple work queue, per-message visibility and DLQ; Kafka is overkill unless you also need replay/many consumers."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "patterns",
+   "title": "Outbox, Saga & CQRS",
+   "category": "Async",
+   "summary": "Patterns that keep services consistent without distributed transactions.",
+   "sections": [
+    {
+     "id": "outbox",
+     "title": "Transactional outbox",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Order service",
+          "kind": "service"
+         }
+        ],
+        [
+         {
+          "label": "orders + outbox tables",
+          "kind": "db",
+          "sub": "one transaction"
+         }
+        ],
+        [
+         {
+          "label": "Relay / Debezium CDC",
+          "kind": "service"
+         }
+        ],
+        [
+         {
+          "label": "Kafka",
+          "kind": "queue"
+         }
+        ]
+       ],
+       "caption": "Dual-write solved: one DB transaction, relay publishes"
+      },
+      {
+       "t": "p",
+       "text": "Writing to the DB and to Kafka separately can fail half-way. Insert the event into an outbox table in the same transaction; a relay publishes it (at-least-once)."
+      }
+     ]
+    },
+    {
+     "id": "saga",
+     "title": "Saga",
+     "blocks": [
+      {
+       "t": "steps",
+       "items": [
+        {
+         "title": "Create order",
+         "text": "Status PENDING. Compensation: cancel order."
+        },
+        {
+         "title": "Reserve inventory",
+         "text": "Compensation: release inventory."
+        },
+        {
+         "title": "Charge payment",
+         "text": "Compensation: refund."
+        },
+        {
+         "title": "Confirm order",
+         "text": "Status CONFIRMED."
+        }
+       ]
+      },
+      {
+       "t": "table",
+       "head": [
+        "Style",
+        "Pro",
+        "Con"
+       ],
+       "rows": [
+        [
+         "Choreography (events)",
+         "Loose coupling",
+         "Flow is hard to see and debug"
+        ],
+        [
+         "Orchestration (Temporal, Step Functions)",
+         "Central, debuggable, timeouts",
+         "Orchestrator is a component to run"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "cqrs",
+     "title": "CQRS & event sourcing",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**CQRS**: write model (validated, normalized) separate from read models (denormalized per screen), synced by events.",
+        "**Event sourcing**: the event log is the truth; state = replay + snapshots. Audit trail for free; schema evolution is harder.",
+        "Natural fit: ledgers, trading, order lifecycles."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "outbox-deep",
+     "title": "Outbox in depth",
+     "blocks": [
+      {
+       "t": "code",
+       "lang": "sql",
+       "text": "BEGIN;\nINSERT INTO orders(id, user_id, total, status) VALUES ($1,$2,$3,'PENDING');\nINSERT INTO outbox(id, aggregate_id, type, payload, created_at)\n  VALUES (gen_random_uuid(), $1, 'OrderCreated', $4, now());\nCOMMIT;\n-- relay: SELECT ... FROM outbox WHERE sent_at IS NULL ORDER BY created_at LIMIT 500 FOR UPDATE SKIP LOCKED\n-- or Debezium reads the WAL and publishes, no polling"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Delivery is at-least-once; consumers dedupe by event ID (inbox table).",
+        "Keep per-aggregate order by keying Kafka messages by aggregate_id.",
+        "Clean up sent rows or partition the outbox table by day."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "saga-deep",
+     "title": "Saga design details",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Concern",
+        "Answer"
+       ],
+       "rows": [
+        [
+         "Isolation",
+         "No global isolation; use semantic locks (status PENDING) and commutative updates"
+        ],
+        [
+         "Compensation",
+         "Business undo (refund, release stock), not a DB rollback; must be idempotent"
+        ],
+        [
+         "Pivot transaction",
+         "Step after which the saga only goes forward (e.g. payment captured)"
+        ],
+        [
+         "Timeouts",
+         "Orchestrator timers cancel stuck sagas"
+        ],
+        [
+         "Observability",
+         "Saga ID propagated through every event; state table per saga"
+        ]
+       ]
+      },
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Order service",
+          "kind": "service",
+          "sub": "orchestrator"
+         }
+        ],
+        [
+         {
+          "label": "Inventory",
+          "kind": "service",
+          "sub": "reserve / release"
+         },
+         {
+          "label": "Payments",
+          "kind": "service",
+          "sub": "charge / refund"
+         },
+         {
+          "label": "Shipping",
+          "kind": "service",
+          "sub": "create / cancel"
+         }
+        ],
+        [
+         {
+          "label": "Saga state table",
+          "kind": "db"
+         }
+        ]
+       ],
+       "caption": "Orchestrated order saga"
+      }
+     ]
+    },
+    {
+     "id": "event-sourcing-deep",
+     "title": "Event sourcing in depth",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "State = fold(events). Commands are validated against current state, then emit events appended to the aggregate's stream with optimistic concurrency (expected version).",
+        "Snapshots every N events speed up loading.",
+        "Projections build read models; rebuild by replaying from offset 0.",
+        "Schema evolution: upcasters convert old event versions; never edit past events.",
+        "GDPR: crypto-shredding (encrypt personal data per user, delete the key)."
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "Event sourcing everywhere is over-engineering. Use it where history is the product: ledgers, trading, audit-heavy workflows."
+      }
+     ]
+    },
+    {
+     "id": "other-patterns",
+     "title": "Other patterns worth naming",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Pattern",
+        "What",
+        "When"
+       ],
+       "rows": [
+        [
+         "Strangler fig",
+         "Route slices of a monolith to new services gradually",
+         "Migrations"
+        ],
+        [
+         "Backend for frontend (BFF)",
+         "Per-client API layer",
+         "Mobile vs web needs differ"
+        ],
+        [
+         "Sidecar / service mesh",
+         "Proxy next to each service for mTLS, retries, metrics",
+         "Many microservices"
+        ],
+        [
+         "Bulkhead",
+         "Isolate resource pools",
+         "Protect critical paths"
+        ],
+        [
+         "Inbox",
+         "Dedupe table of processed message IDs",
+         "Idempotent consumers"
+        ],
+        [
+         "Change data capture",
+         "Stream DB changes",
+         "Search, caches, analytics in sync"
+        ],
+        [
+         "Cell architecture",
+         "Independent stacks per user slice",
+         "Limit blast radius"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Choreography or orchestration?",
+         "a": "Choreography for 2–3 simple steps; orchestration once there are many steps, timeouts, or you need to see and debug the flow."
+        },
+        {
+         "q": "How do you avoid the dual-write problem?",
+         "a": "Transactional outbox or CDC; never write DB then publish in two separate calls without one."
+        },
+        {
+         "q": "How do CQRS read models stay consistent?",
+         "a": "Eventually: projections consume events; return the write's version so clients can wait or show pending state."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "stream-processing",
+   "category": "Async",
+   "title": "Stream Processing & Change Data Capture",
+   "summary": "Process events continuously: event time vs processing time, windows and watermarks, stateful operators with checkpoints, exactly-once sinks, and CDC to stream a database's changes into everything else.",
+   "sections": [
+    {
+     "id": "model",
+     "title": "Batch vs stream",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Batch (Spark, MapReduce)",
+         "pros": [
+          "Simple, reprocess everything",
+          "Great for daily reports, ML training"
+         ],
+         "cons": [
+          "Results are hours old"
+         ]
+        },
+        {
+         "title": "Stream (Flink, Kafka Streams, Spark Structured Streaming)",
+         "pros": [
+          "Seconds of latency",
+          "Continuous aggregates, alerting"
+         ],
+         "cons": [
+          "State, ordering and late data to manage"
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "time",
+     "title": "Event time, windows and watermarks",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Event time** = when it happened; **processing time** = when you saw it. Aggregate on event time for correct results.",
+        "**Windows:** tumbling (fixed, non-overlapping), sliding (overlapping), session (gap-based).",
+        "**Watermark:** an assertion that no events older than T will arrive; a window closes when the watermark passes its end. Late events go to a side output or update results."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "state",
+     "title": "State and exactly-once",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Operators keep keyed state (counts, joins) locally (RocksDB), checkpointed periodically to durable storage together with source offsets.",
+        "On failure, restore the last checkpoint and replay from those offsets → **exactly-once state**.",
+        "**Exactly-once output** needs transactional sinks (two-phase commit) or idempotent upserts keyed deterministically."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "cdc",
+     "title": "Change Data Capture",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "CDC tails a database's replication log (Postgres WAL, MySQL binlog) and publishes each row change as an event (Debezium → Kafka). It keeps search indexes, caches, warehouses and other services in sync without dual writes from the application."
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Common mistake",
+       "text": "Dual writes (write DB, then publish to Kafka in app code). One of the two can fail, leaving them inconsistent. Use CDC or the transactional outbox."
+      }
+     ]
+    },
+    {
+     "id": "arch",
+     "title": "Lambda vs Kappa",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Lambda",
+         "pros": [
+          "Batch layer is authoritative; stream gives fast approximations"
+         ],
+         "cons": [
+          "Two code paths"
+         ]
+        },
+        {
+         "title": "Kappa",
+         "pros": [
+          "Single streaming path; reprocess by replaying the log"
+         ],
+         "cons": [
+          "Needs long log retention and replay capacity"
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "questions",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "What is backpressure?",
+         "a": "When a downstream operator is slow, upstream slows down instead of buffering unboundedly; Flink does it via credit-based flow control."
+        },
+        {
+         "q": "How do you join two streams?",
+         "a": "Windowed join on a key, holding each side's events in state for the window duration."
+        },
+        {
+         "q": "Why partition by key?",
+         "a": "All events for a key go to one operator instance, so its state is local and ordering per key is preserved."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "workflows",
+   "category": "Async",
+   "title": "Workflows & Long-Running Jobs",
+   "summary": "Coordinate multi-step processes that take seconds to days: job queues with retries, durable workflow engines (Temporal, Step Functions), sagas with compensation, timers and human-in-the-loop steps.",
+   "sections": [
+    {
+     "id": "when",
+     "title": "When you need more than a queue",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "A single async task (resize an image) → a job queue + workers.",
+        "Several dependent steps with retries, timeouts and branching (order → payment → inventory → shipping) → a **workflow**.",
+        "Steps that wait hours or days (approval, trial expiry) → durable timers."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "engines",
+     "title": "Durable execution",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "Workflow engines persist every step's result in an event history. If a worker crashes mid-workflow, another worker replays the history to rebuild state and continues from the next step. The workflow code looks sequential, but each step (an 'activity') is retried independently with its own timeout."
+      },
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Temporal / Cadence",
+         "pros": [
+          "Workflow as code; long-running; strong replay semantics"
+         ],
+         "cons": [
+          "Workflow code must be deterministic"
+         ]
+        },
+        {
+         "title": "AWS Step Functions",
+         "pros": [
+          "Managed, visual state machine"
+         ],
+         "cons": [
+          "JSON/YAML definitions; per-transition cost"
+         ]
+        },
+        {
+         "title": "Airflow",
+         "pros": [
+          "Batch DAGs on a schedule"
+         ],
+         "cons": [
+          "Not for per-request, low-latency workflows"
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "saga",
+     "title": "Sagas and compensation",
+     "blocks": [
+      {
+       "t": "steps",
+       "items": [
+        {
+         "title": "Reserve inventory",
+         "text": "Compensation: release inventory."
+        },
+        {
+         "title": "Charge payment",
+         "text": "Compensation: refund."
+        },
+        {
+         "title": "Create shipment",
+         "text": "Compensation: cancel shipment."
+        },
+        {
+         "title": "On failure",
+         "text": "Run compensations in reverse order for completed steps."
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "patterns",
+     "title": "Patterns for long-running tasks",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Return 202 + a job id immediately; clients poll status or receive a webhook/SSE event.",
+        "Every step idempotent (step id as idempotency key) because retries are guaranteed.",
+        "Heartbeats for long activities so stuck workers are detected.",
+        "Store large intermediate data in blob storage and pass references."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "questions",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Why must Temporal workflow code be deterministic?",
+         "a": "Recovery replays the code against recorded history; non-deterministic calls (random, time, I/O) would diverge — they belong in activities."
+        },
+        {
+         "q": "Saga vs 2PC?",
+         "a": "2PC locks resources across services and blocks on coordinator failure; sagas commit locally and compensate, trading isolation for availability."
+        },
+        {
+         "q": "How do you show progress for a 20-minute job?",
+         "a": "Workers update a progress record; the client subscribes via SSE or polls the job status endpoint."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "rate-limiting",
+   "title": "Rate Limiting",
+   "category": "Traffic",
+   "summary": "Token bucket for bursty APIs, sliding windows for accuracy, Redis + Lua for distributed counters.",
+   "sections": [
+    {
+     "id": "algos",
+     "title": "Algorithms",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Algorithm",
+        "Bursts",
+        "Memory",
+        "Use when"
+       ],
+       "rows": [
+        [
+         "Token bucket",
+         "Up to bucket size",
+         "2 numbers",
+         "API default (Stripe, AWS)"
+        ],
+        [
+         "Leaky bucket",
+         "Smoothed",
+         "Queue",
+         "Fixed-rate downstream"
+        ],
+        [
+         "Fixed window",
+         "2× at window edges",
+         "1 counter",
+         "Coarse limits"
+        ],
+        [
+         "Sliding log",
+         "Exact",
+         "1 entry/request",
+         "Low volume, strict"
+        ],
+        [
+         "Sliding window counter",
+         "Approximate",
+         "2 counters",
+         "High volume"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "impl",
+     "title": "Distributed implementation",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Client",
+          "kind": "client"
+         }
+        ],
+        [
+         {
+          "label": "API gateway",
+          "kind": "edge",
+          "sub": "limiter middleware"
+         }
+        ],
+        [
+         {
+          "label": "Redis",
+          "kind": "cache",
+          "sub": "Lua: refill + take"
+         }
+        ],
+        [
+         {
+          "label": "Service",
+          "kind": "service"
+         }
+        ]
+       ],
+       "caption": "Check before forwarding; 429 on reject"
+      },
+      {
+       "t": "code",
+       "lang": "lua",
+       "text": "-- token bucket: KEYS[1]=bucket, ARGV = capacity, rate/s, now\nlocal b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')\nlocal tokens = tonumber(b[1]) or tonumber(ARGV[1])\nlocal ts = tonumber(b[2]) or tonumber(ARGV[3])\ntokens = math.min(tonumber(ARGV[1]), tokens + (ARGV[3] - ts) * ARGV[2])\nlocal ok = tokens >= 1\nif ok then tokens = tokens - 1 end\nredis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', ARGV[3])\nredis.call('EXPIRE', KEYS[1], 60)\nreturn ok and 1 or 0"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Key by user, API key, IP or tenant tier: `rl:{user}:{endpoint}`.",
+        "Return **429** with Retry-After and X-RateLimit-Remaining.",
+        "Decide **fail-open** vs **fail-closed** if Redis is down.",
+        "For extreme scale, keep local counters and sync to Redis periodically (approximate)."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "math",
+     "title": "Algorithm details",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Token bucket:** tokens = min(cap, tokens + (now − last) × rate); allow if tokens ≥ 1. Parameters: rate (average) and capacity (burst).",
+        "**Leaky bucket (queue):** requests enter a FIFO drained at a constant rate; overflow rejected. Smooths output.",
+        "**Fixed window:** count per window key `rl:u:minute`; boundary burst up to 2× limit.",
+        "**Sliding log:** store each timestamp in a sorted set; exact; memory O(requests).",
+        "**Sliding window counter:** estimate = current_count + previous_count × (1 − elapsed/window); ~accurate with 2 counters.",
+        "**GCRA** (generic cell rate algorithm): token bucket expressed as a single 'theoretical arrival time' value — one key, used by redis-cell."
+       ]
+      },
+      {
+       "t": "code",
+       "lang": "text",
+       "text": "Sliding window counter example: limit 100/min\n previous minute = 80, current = 30, 25% into current minute\n estimate = 30 + 80 × 0.75 = 90 → allow"
+      }
+     ]
+    },
+    {
+     "id": "distributed-deep",
+     "title": "Distributed rate limiting",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Approach",
+        "Accuracy",
+        "Latency",
+        "Notes"
+       ],
+       "rows": [
+        [
+         "Central Redis per request",
+         "High",
+         "+0.5–1 ms",
+         "Lua for atomicity; Redis becomes critical path"
+        ],
+        [
+         "Local counters + periodic sync",
+         "Approximate",
+         "~0",
+         "Each node gets a share of the quota"
+        ],
+        [
+         "Sticky routing by key",
+         "High",
+         "~0",
+         "Hash clients to one limiter node"
+        ],
+        [
+         "Envoy global rate limit service",
+         "High",
+         "+RPC",
+         "Descriptor-based rules"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "policy",
+     "title": "Policies and responses",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Dimensions: per user, API key, IP, endpoint, tenant tier; global limits protect shared backends.",
+        "Respond 429 with `Retry-After`, `RateLimit-Limit/Remaining/Reset` headers.",
+        "Different limits for reads vs writes; cost-based limits (tokens for LLM APIs, query cost for GraphQL).",
+        "Fail-open for availability (most APIs) vs fail-closed for abuse-sensitive endpoints (login, OTP).",
+        "Layered: edge/WAF for DDoS, gateway for per-client quotas, service-level concurrency limits."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "adaptive",
+     "title": "Adaptive limits and load shedding",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Concurrency limits (Netflix concurrency-limits, TCP-Vegas-style) adjust allowed in-flight requests based on latency.",
+        "Priority shedding: drop background and free-tier traffic first.",
+        "Queue with deadline: drop requests that would time out anyway."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Design a rate limiter for a public API.",
+         "a": "Token bucket per API key in Redis via Lua at the gateway; config per plan; 429 + headers; local fallback limits if Redis is down; metrics on rejections."
+        },
+        {
+         "q": "Login brute-force protection?",
+         "a": "Limit per account and per IP with exponential lockout, CAPTCHA after N failures, fail-closed."
+        },
+        {
+         "q": "Why not fixed windows?",
+         "a": "Burst of 2× at boundaries; use sliding window counter for nearly the same cost."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "resilience",
+   "title": "Idempotency, Retries & Circuit Breakers",
+   "category": "Traffic",
+   "summary": "Assume calls fail, are slow, or arrive twice; contain the blast radius.",
+   "sections": [
+    {
+     "id": "idem",
+     "title": "Idempotency keys",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Client",
+          "kind": "client",
+          "sub": "Idempotency-Key: uuid"
+         }
+        ],
+        [
+         {
+          "label": "Payment API",
+          "kind": "service"
+         }
+        ],
+        [
+         {
+          "label": "Key store",
+          "kind": "cache",
+          "sub": "key → status + response"
+         }
+        ],
+        [
+         {
+          "label": "Payment processor",
+          "kind": "ext"
+         }
+        ]
+       ],
+       "caption": "Repeat key returns the stored response"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Client makes one UUID per logical operation and reuses it on retry.",
+        "Server inserts key as IN_PROGRESS (unique constraint); duplicates wait or get 409.",
+        "On finish store the response for ~24 h; a retry gets the same response, no second charge."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "retries",
+     "title": "Retries & timeouts",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Every call has a timeout shorter than its caller's.",
+        "Exponential backoff with **full jitter**: sleep = random(0, base × 2^n), capped.",
+        "Retry budget ≈ 10% of traffic; retry only idempotent calls on transient errors."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "breaker",
+     "title": "Circuit breaker & bulkheads",
+     "blocks": [
+      {
+       "t": "steps",
+       "items": [
+        {
+         "title": "Closed",
+         "text": "Calls flow; failures counted."
+        },
+        {
+         "title": "Open",
+         "text": "Threshold crossed (e.g. 50% in 10 s): fail fast, use fallback."
+        },
+        {
+         "title": "Half-open",
+         "text": "After cool-down let a few probes through; success closes, failure reopens."
+        }
+       ]
+      },
+      {
+       "t": "list",
+       "items": [
+        "**Bulkhead**: separate pools per dependency.",
+        "**Load shedding**: drop low-priority work first.",
+        "**Graceful degradation**: stale cache, hide widgets, read-only mode.",
+        "SLI → SLO → SLA; RPO (data loss allowed) and RTO (recovery time) drive DR design."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "timeouts-deep",
+     "title": "Timeouts and deadlines",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Set connect and request timeouts on every call; defaults are often infinite.",
+        "Propagate deadlines (gRPC deadline, header) so downstream services stop work the caller abandoned.",
+        "Timeout budget: caller 1 s → service A 800 ms → its call to B 300 ms.",
+        "Hedged requests: after p95 latency, send a duplicate to another replica and take the first response (idempotent reads only)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "retry-deep",
+     "title": "Retries that don't make things worse",
+     "blocks": [
+      {
+       "t": "code",
+       "lang": "text",
+       "text": "sleep = random(0, min(cap, base * 2^attempt))      # full jitter\nretry only on: timeouts, 429, 502, 503, 504, connection reset\nnever retry: 400, 401, 403, 404, 409 (business errors)\nretry budget: retries ≤ 10% of requests per client"
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "Retries at every layer multiply: 3 layers × 3 retries = 27 calls to the bottom service during an outage. Retry at one layer only."
+      }
+     ]
+    },
+    {
+     "id": "breaker-deep",
+     "title": "Circuit breaker details",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Parameter",
+        "Typical"
+       ],
+       "rows": [
+        [
+         "Failure rate threshold",
+         "50% over a sliding window of 20–100 calls"
+        ],
+        [
+         "Slow-call threshold",
+         "Calls > 2 s counted as failures"
+        ],
+        [
+         "Open duration",
+         "30–60 s"
+        ],
+        [
+         "Half-open probes",
+         "3–10 calls"
+        ]
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Pair with fallbacks: cached data, default, queued for later, or a clear error. Breakers per dependency (and per host for outlier ejection)."
+      }
+     ]
+    },
+    {
+     "id": "idempotency-deep",
+     "title": "Idempotency in depth",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Idempotency key table: `(key PK, request_hash, status, response, created_at)` with a unique constraint.",
+        "Same key + different payload → 422 (client bug).",
+        "Naturally idempotent operations: PUT full resource, `SET status='PAID' WHERE status='PENDING'`.",
+        "Consumers: dedupe by message ID (inbox) or make writes upserts.",
+        "Expire keys after the retry window (24 h–7 d)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "chaos",
+     "title": "Testing resilience",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Chaos engineering: kill instances, inject latency, partition networks in staging and (carefully) production.",
+        "Game days for failover drills; measure RTO/RPO for real.",
+        "Load tests at 2× expected peak; soak tests for leaks."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Payment API timed out. Did it charge?",
+         "a": "Unknown — so retry with the same idempotency key; the server returns the original result if it already processed it."
+        },
+        {
+         "q": "What's a retry storm and how do you stop it?",
+         "a": "Synchronized retries amplifying an outage; jittered exponential backoff, retry budgets, circuit breakers, and server-side load shedding."
+        },
+        {
+         "q": "Liveness vs readiness probes?",
+         "a": "Liveness failing restarts the container; readiness failing removes it from load balancing without restart (e.g. while warming caches)."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "apis-realtime",
+   "title": "APIs & Realtime",
+   "category": "Communication",
+   "summary": "REST, GraphQL and gRPC for request-response; SSE, WebSockets and long polling when the server pushes.",
+   "sections": [
+    {
+     "id": "styles",
+     "title": "API styles",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Style",
+        "Strength",
+        "Weakness"
+       ],
+       "rows": [
+        [
+         "REST",
+         "Simple, cacheable",
+         "Over/under-fetching"
+        ],
+        [
+         "GraphQL",
+         "Exact fields, one round trip",
+         "Caching, N+1, query cost"
+        ],
+        [
+         "gRPC",
+         "Typed, compact, streaming",
+         "Not browser-native"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "tip",
+       "title": "Tip",
+       "text": "Use cursor pagination (`?cursor=…&limit=50`) for feeds; offsets break when rows are inserted and get slow deep in the list."
+      }
+     ]
+    },
+    {
+     "id": "realtime",
+     "title": "Realtime choices",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Option",
+        "Direction",
+        "Good for"
+       ],
+       "rows": [
+        [
+         "Long polling",
+         "Server → client",
+         "Simple notifications, fallback"
+        ],
+        [
+         "SSE",
+         "Server → client",
+         "Feeds, notifications, LLM tokens"
+        ],
+        [
+         "WebSocket",
+         "Both",
+         "Chat, games, collab editing, trading"
+        ],
+        [
+         "WebRTC",
+         "Peer to peer",
+         "Voice and video"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "ws",
+     "title": "Scaling WebSockets",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Clients",
+          "kind": "client"
+         }
+        ],
+        [
+         {
+          "label": "L4 LB",
+          "kind": "edge"
+         }
+        ],
+        [
+         {
+          "label": "Gateway 1",
+          "kind": "service",
+          "sub": "50k conns"
+         },
+         {
+          "label": "Gateway 2",
+          "kind": "service",
+          "sub": "50k conns"
+         }
+        ],
+        [
+         {
+          "label": "Redis registry + pub/sub",
+          "kind": "cache",
+          "sub": "user → gateway"
+         }
+        ]
+       ],
+       "caption": "Stateful edge, stateless core"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Dedicated gateway tier holds connections; logic stays in stateless services.",
+        "Registry maps user → gateway; deliver by routing to that node or via pub/sub.",
+        "Heartbeats every ~30 s; clients reconnect with backoff and resume from last message ID."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "rest-deep",
+     "title": "REST design rules",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Topic",
+        "Rule"
+       ],
+       "rows": [
+        [
+         "Resources",
+         "Nouns, plural, nested only one level: /users/42/orders"
+        ],
+        [
+         "Verbs",
+         "GET read, POST create, PUT replace, PATCH partial, DELETE"
+        ],
+        [
+         "Status codes",
+         "201 created, 202 accepted (async), 204 no content, 400/401/403/404/409/422/429, 5xx"
+        ],
+        [
+         "Pagination",
+         "Cursor (opaque, encodes last sort key) > offset"
+        ],
+        [
+         "Versioning",
+         "/v1 in path or header; never break clients"
+        ],
+        [
+         "Idempotency",
+         "Idempotency-Key on POST that creates side effects"
+        ],
+        [
+         "Errors",
+         "Consistent body { code, message, details }"
+        ],
+        [
+         "Caching",
+         "ETag + If-None-Match, Cache-Control"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "grpc-graphql",
+     "title": "gRPC and GraphQL details",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "gRPC: Protobuf schemas, HTTP/2 multiplexing, unary + server/client/bidi streaming, deadlines, generated clients. Needs gRPC-Web or a gateway for browsers.",
+        "GraphQL: single endpoint, typed schema, client picks fields; solve N+1 with DataLoader batching; protect with depth/complexity limits and persisted queries; caching via normalized client caches (Apollo) since HTTP caching is harder.",
+        "Federation (Apollo) composes subgraphs owned by different teams."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "realtime-deep",
+     "title": "Realtime transport internals",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**Long polling:** server holds the request until data or ~30 s timeout; client re-requests immediately.",
+        "**SSE:** `Content-Type: text/event-stream`; `id:` lets the browser resume with `Last-Event-ID`; HTTP/1.1 browsers limit ~6 connections per domain (fine on HTTP/2).",
+        "**WebSocket:** HTTP `Upgrade` → full-duplex frames; needs ping/pong heartbeats, auth on connect (token in first message or cookie), and reconnect logic.",
+        "**WebRTC:** peer-to-peer UDP with ICE/STUN/TURN; SFU servers for group calls.",
+        "**MQTT:** lightweight pub/sub for IoT over TCP, QoS levels 0/1/2."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "fanout-deep",
+     "title": "Fan-out architecture for realtime",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Connection tier (gateways) is stateful; business tier stateless.",
+        "Presence/registry store: user → gateway ID with TTL refreshed by heartbeat.",
+        "Message routing: pub/sub channel per gateway or per topic (Redis, NATS, Kafka for durable).",
+        "Delivery guarantees: sequence numbers per conversation; client acks; resend gap on reconnect.",
+        "Backpressure: drop or coalesce updates for slow clients (latest-value-wins for presence, prices)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "How do you authenticate a WebSocket?",
+         "a": "Short-lived token from the HTTP API passed on connect (query param over TLS or first message); gateway validates and binds user ID to the socket; re-auth on expiry."
+        },
+        {
+         "q": "SSE or WebSocket for live sports scores?",
+         "a": "SSE: one-way, simple, works through proxies and auto-reconnects."
+        },
+        {
+         "q": "How do you scale to 10M WebSocket connections?",
+         "a": "~200 gateways at 50k each, L4 LB, connection registry, pub/sub routing, jittered reconnects, heartbeats; tune kernel (file descriptors, memory per socket)."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "microservices",
+   "category": "Communication",
+   "title": "Microservices, API Gateway & Service Discovery",
+   "summary": "How services find and talk to each other: gateways at the edge, service discovery, sync vs async calls, service mesh, and when a monolith is the better answer.",
+   "sections": [
+    {
+     "id": "gateway",
+     "title": "API gateway",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Single entry point: authentication, rate limiting, request routing, TLS termination, request/response transformation.",
+        "**BFF (backend for frontend):** a gateway per client type (web, mobile) that aggregates calls.",
+        "Keep business logic out of the gateway — it becomes a bottleneck and a shared deployment."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "discovery",
+     "title": "Service discovery",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Client-side (Eureka, Consul + client lib)",
+         "pros": [
+          "Client picks a healthy instance, no extra hop"
+         ],
+         "cons": [
+          "Discovery logic in every language"
+         ]
+        },
+        {
+         "title": "Server-side (LB / Kubernetes Service)",
+         "pros": [
+          "Clients just call a stable name"
+         ],
+         "cons": [
+          "Extra hop; LB must scale"
+         ]
+        }
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Kubernetes gives you DNS-based discovery for free: `orders.default.svc` resolves to a virtual IP that load-balances to healthy pods."
+      }
+     ]
+    },
+    {
+     "id": "comm",
+     "title": "Sync vs async",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Synchronous (REST / gRPC)",
+         "pros": [
+          "Simple request/response",
+          "Immediate result"
+         ],
+         "cons": [
+          "Coupled availability: A is down if B is down",
+          "Latency adds up across hops"
+         ]
+        },
+        {
+         "title": "Asynchronous (events / queues)",
+         "pros": [
+          "Decoupled, absorbs bursts",
+          "Easy fan-out to new consumers"
+         ],
+         "cons": [
+          "Eventual consistency; harder debugging"
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "mesh",
+     "title": "Service mesh",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "A sidecar proxy (Envoy) next to each service handles mTLS, retries, timeouts, circuit breaking and telemetry, configured centrally (Istio, Linkerd). It moves cross-cutting network concerns out of application code, at the cost of extra latency and operational complexity."
+      }
+     ]
+    },
+    {
+     "id": "monolith",
+     "title": "When not to split",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Small team, unclear domain boundaries, or a single database everyone writes to → a modular monolith is faster and more reliable.",
+        "Split along business capabilities with their own data; never share a database between services.",
+        "Distributed transactions across services → sagas, not 2PC."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "questions",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "How do you avoid cascading failures?",
+         "a": "Timeouts on every call, retries with budgets and jitter, circuit breakers, bulkheads, and fallbacks."
+        },
+        {
+         "q": "How do you trace a request across 10 services?",
+         "a": "Propagate a trace id (W3C traceparent) and emit spans to a tracing backend (OpenTelemetry → Jaeger/Tempo)."
+        },
+        {
+         "q": "What does the gateway do for auth?",
+         "a": "Validates the token (JWT/OAuth) and passes identity claims downstream; services still authorise actions."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ids",
+   "title": "Unique ID Generation",
+   "category": "Specialized",
+   "summary": "Snowflake-style IDs are sortable and need no coordination per ID.",
+   "sections": [
+    {
+     "id": "options",
+     "title": "Options",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Approach",
+        "Sortable",
+        "Notes"
+       ],
+       "rows": [
+        [
+         "Auto-increment",
+         "Yes",
+         "Single-DB bottleneck, leaks volume"
+        ],
+        [
+         "UUID v4",
+         "No",
+         "Random, poor index locality"
+        ],
+        [
+         "UUID v7 / ULID",
+         "Yes",
+         "Time-prefixed; good default"
+        ],
+        [
+         "Snowflake",
+         "Yes",
+         "64-bit, ~4M IDs/s per node"
+        ],
+        [
+         "Range allocation",
+         "Roughly",
+         "Hand out blocks of 1,000 from a counter"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "snowflake",
+     "title": "Snowflake layout",
+     "blocks": [
+      {
+       "t": "code",
+       "lang": "text",
+       "text": "| 1 bit sign | 41 bits ms since epoch (~69 yrs) | 10 bits machine (1,024) | 12 bits sequence (4,096/ms) |"
+      },
+      {
+       "t": "callout",
+       "tone": "warn",
+       "title": "Trap",
+       "text": "If the clock moves backwards, refuse to issue IDs until it catches up, or you'll create duplicates."
+      }
+     ]
+    },
+    {
+     "id": "requirements-ids",
+     "title": "What an ID needs",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Property",
+        "Why"
+       ],
+       "rows": [
+        [
+         "Unique",
+         "Correctness"
+        ],
+        [
+         "Sortable by time",
+         "Index locality, pagination, feeds"
+        ],
+        [
+         "No coordination per ID",
+         "Throughput, availability"
+        ],
+        [
+         "Compact (64-bit)",
+         "Index size, URLs"
+        ],
+        [
+         "Not guessable (sometimes)",
+         "Security / scraping"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "variants",
+     "title": "Variants in production",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Scheme",
+        "Layout",
+        "Used by"
+       ],
+       "rows": [
+        [
+         "Twitter Snowflake",
+         "41 ms time | 10 worker | 12 seq",
+         "Twitter, Discord (custom epoch)"
+        ],
+        [
+         "Instagram",
+         "41 ms time | 13 logical shard | 10 seq (generated in Postgres)",
+         "Instagram"
+        ],
+        [
+         "Sonyflake",
+         "39 bits 10 ms units | 8 seq | 16 machine",
+         "Longer lifetime"
+        ],
+        [
+         "ULID",
+         "48-bit ms time + 80 random, base32",
+         "Many apps"
+        ],
+        [
+         "UUIDv7",
+         "48-bit ms time + random, standard UUID",
+         "New default"
+        ],
+        [
+         "Flickr ticket server",
+         "DB auto-increment with step = N servers",
+         "Flickr"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "pitfalls-ids",
+     "title": "Pitfalls",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Clock moves backwards (NTP) → duplicates: refuse or wait until clock passes last timestamp.",
+        "Worker ID assignment must be unique: from ZooKeeper/etcd, pod ordinal, or config.",
+        "Sequential IDs leak business volume and enable scraping; expose an encoded/permuted form.",
+        "Random UUIDv4 as clustered primary key fragments B-tree pages; prefer time-ordered IDs."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "How do you generate IDs across data centers?",
+         "a": "Include a data-center bits field in the Snowflake layout, or allocate worker IDs per DC."
+        },
+        {
+         "q": "How many IDs per second can Snowflake produce?",
+         "a": "4,096 per ms per worker ≈ 4M/s per worker; 1,024 workers."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "search",
+   "title": "Search & Typeahead",
+   "category": "Specialized",
+   "summary": "Inverted indexes sharded by document, fed by CDC; tries for prefix suggestions.",
+   "sections": [
+    {
+     "id": "inverted",
+     "title": "Inverted index",
+     "blocks": [
+      {
+       "t": "code",
+       "lang": "text",
+       "text": "\"redis\"  → [doc3: pos 4, doc9: pos 1, doc12: pos 7]\n\"cache\"  → [doc3: pos 5, doc7: pos 2]"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Build: tokenize → lowercase → stem → drop stop words.",
+        "Rank with BM25 plus signals (recency, popularity, personalization).",
+        "Shard by document; query fans out to all shards and merges top-k.",
+        "Source of truth stays in the DB; index fed by CDC/Kafka with seconds of lag."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "typeahead",
+     "title": "Typeahead",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "Trie of prefixes, each node storing the top-k completions; rebuilt offline from query logs and cached per prefix at the edge. Debounce keystrokes on the client."
+      }
+     ]
+    },
+    {
+     "id": "pipeline",
+     "title": "Indexing pipeline",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Primary DB",
+          "kind": "db"
+         }
+        ],
+        [
+         {
+          "label": "CDC / Kafka",
+          "kind": "queue"
+         }
+        ],
+        [
+         {
+          "label": "Indexer",
+          "kind": "service",
+          "sub": "enrich, analyze"
+         }
+        ],
+        [
+         {
+          "label": "Search cluster",
+          "kind": "store",
+          "sub": "shards + replicas"
+         }
+        ],
+        [
+         {
+          "label": "Search API",
+          "kind": "service"
+         }
+        ]
+       ],
+       "caption": "Source of truth stays in the DB"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Analyzer chain: char filters → tokenizer → token filters (lowercase, stemming, synonyms, stop words).",
+        "Near-real-time: Elasticsearch refreshes segments every ~1 s; documents become searchable then.",
+        "Reindex with aliases: build a new index, switch the alias atomically."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "ranking-deep",
+     "title": "Relevance and ranking",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "BM25 = term frequency saturation × inverse document frequency × length normalization.",
+        "Boost fields (title > body), freshness decay functions, popularity signals.",
+        "Two-stage: retrieve top 1,000 cheaply, re-rank with ML (learning to rank) or cross-encoders.",
+        "Hybrid search: combine BM25 with vector similarity (embeddings) using reciprocal rank fusion."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "scaling-search",
+     "title": "Scaling a search cluster",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Shard by document; each query fans out to one copy of every shard and merges top-k (scatter-gather).",
+        "Shard count fixed at index creation (ES) — size shards 10–50 GB.",
+        "Replicas add query throughput and availability.",
+        "Time-based indices for logs (daily) with ILM to move old indices to warm/cold tiers.",
+        "Typeahead: completion suggester / edge n-grams, or a dedicated trie service cached at the edge."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "vector",
+     "title": "Vector search",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Embeddings map text/images to vectors; similarity by cosine / dot product.",
+        "ANN indexes: HNSW (graph, fast, memory-heavy), IVF + PQ (clustered, compressed).",
+        "Stores: pgvector, Elasticsearch/OpenSearch kNN, Pinecone, Weaviate, Milvus, FAISS.",
+        "Trade-off: recall vs latency vs memory; filter + vector search needs pre/post-filtering care."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Why not search with SQL LIKE?",
+         "a": "`LIKE '%term%'` can't use B-tree indexes, has no ranking, stemming or typo tolerance; an inverted index is built for it."
+        },
+        {
+         "q": "How do you keep search in sync with the DB?",
+         "a": "CDC → Kafka → indexer with idempotent upserts by document ID and version checks; periodic full reindex to repair drift."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "blob",
+   "title": "Blob Storage & Media",
+   "category": "Specialized",
+   "summary": "Bytes in object storage, metadata in a DB, direct uploads via presigned URLs, delivery via CDN.",
+   "sections": [
+    {
+     "id": "upload",
+     "title": "Upload path",
+     "blocks": [
+      {
+       "t": "flow",
+       "rows": [
+        [
+         {
+          "label": "Client",
+          "kind": "client"
+         }
+        ],
+        [
+         {
+          "label": "API",
+          "kind": "service",
+          "sub": "issues presigned URL"
+         }
+        ],
+        [
+         {
+          "label": "S3",
+          "kind": "store",
+          "sub": "multipart upload"
+         }
+        ],
+        [
+         {
+          "label": "Event → transcoder / thumbnailer",
+          "kind": "queue"
+         }
+        ],
+        [
+         {
+          "label": "CDN",
+          "kind": "edge"
+         }
+        ]
+       ],
+       "caption": "Servers never proxy large bytes"
+      },
+      {
+       "t": "list",
+       "items": [
+        "Multipart: 5–100 MB parts uploaded in parallel and resumable.",
+        "Durability: 3× replication or erasure coding (10+4 survives 4 losses at 1.4× cost).",
+        "Lifecycle rules tier cold data to cheaper storage."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "multipart-deep",
+     "title": "Uploads in depth",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Presigned PUT for small files; multipart for > 100 MB: initiate → upload parts in parallel (each 5 MB–5 GB) → complete with part ETags.",
+        "Resumable: track uploaded parts; retry only failed parts.",
+        "Validate after upload: size, MIME sniffing, virus scan, then mark ready.",
+        "Event on object created (S3 → SNS/SQS/Lambda) triggers processing (thumbnails, transcoding)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "durability-deep",
+     "title": "Durability math",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Scheme",
+        "Overhead",
+        "Survives"
+       ],
+       "rows": [
+        [
+         "3× replication",
+         "3.0×",
+         "2 copies lost"
+        ],
+        [
+         "RS(6,3)",
+         "1.5×",
+         "any 3 shards lost"
+        ],
+        [
+         "RS(10,4)",
+         "1.4×",
+         "any 4 shards lost"
+        ],
+        [
+         "LRC (Azure)",
+         "~1.33×",
+         "local repair with fewer reads"
+        ]
+       ]
+      },
+      {
+       "t": "p",
+       "text": "Erasure coding costs CPU and more network on reads and repairs; replication is better for small, hot objects."
+      }
+     ]
+    },
+    {
+     "id": "serving",
+     "title": "Serving and lifecycle",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Serve via CDN with signed URLs; never stream large files through app servers.",
+        "Image resizing on the fly at the edge or pre-generated variants.",
+        "Lifecycle: standard → infrequent access → archive (Glacier) by age; delete incomplete multipart uploads.",
+        "Content-addressed storage (hash as key) gives dedup for free."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Where do you store image metadata?",
+         "a": "In a DB (owner, key, size, dimensions, status) with the object key; bytes in object storage."
+        },
+        {
+         "q": "How do you prevent hotlinking of private files?",
+         "a": "Private bucket + short-lived signed URLs (or signed cookies at the CDN)."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "geospatial",
+   "title": "Geospatial Indexing",
+   "category": "Specialized",
+   "summary": "Turn 2D proximity into key lookups on cells: geohash, quadtree, H3.",
+   "sections": [
+    {
+     "id": "indexes",
+     "title": "Index options",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Index",
+        "Idea",
+        "Good for"
+       ],
+       "rows": [
+        [
+         "Geohash",
+         "Interleaved lat/long bits; shared prefix = nearby",
+         "Works in any KV with prefix scans"
+        ],
+        [
+         "Quadtree",
+         "Split cells until each has ≤ K points",
+         "Uneven density, in memory"
+        ],
+        [
+         "H3",
+         "Hierarchical hexagons, equidistant neighbours",
+         "Ride matching, surge zones"
+        ],
+        [
+         "R-tree / PostGIS",
+         "Bounding boxes",
+         "Polygons, complex shapes"
+        ]
+       ]
+      },
+      {
+       "t": "callout",
+       "tone": "say",
+       "title": "Say it in the interview",
+       "text": "To find nearby drivers: compute the rider's cell, read drivers in that cell plus its neighbours, then filter by exact distance and ETA."
+      }
+     ]
+    },
+    {
+     "id": "geohash-deep",
+     "title": "Geohash details",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Precision (chars)",
+        "Cell size (approx.)"
+       ],
+       "rows": [
+        [
+         "4",
+         "39 km × 20 km"
+        ],
+        [
+         "5",
+         "4.9 km × 4.9 km"
+        ],
+        [
+         "6",
+         "1.2 km × 0.6 km"
+        ],
+        [
+         "7",
+         "153 m × 153 m"
+        ],
+        [
+         "8",
+         "38 m × 19 m"
+        ]
+       ]
+      },
+      {
+       "t": "list",
+       "items": [
+        "Nearby points share prefixes, except across cell boundaries — always query the 8 neighbours too.",
+        "Store geohash as an indexed string column or Redis GEO (sorted set with 52-bit geohash score)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "quadtree-deep",
+     "title": "Quadtree and S2/H3",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Quadtree: split a cell into 4 when it holds > K points; good for static-ish data (Yelp businesses); in-memory, rebuilt periodically.",
+        "Google S2: cube projected onto sphere, Hilbert curve cell IDs — great for covering polygons.",
+        "Uber H3: hexagons at 16 resolutions; every neighbour equidistant; k-ring queries; good for aggregation (surge, heatmaps)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "patterns-geo",
+     "title": "Common geo problems",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Problem",
+        "Approach"
+       ],
+       "rows": [
+        [
+         "Nearby static places (Yelp)",
+         "Geohash/quadtree index + DB, cached; results ranked by distance + rating"
+        ],
+        [
+         "Moving objects (drivers)",
+         "In-memory cell → set of IDs, updated every few seconds, TTL for stale"
+        ],
+        [
+         "Geofencing (enter/exit zone)",
+         "Polygon index (S2 cover / R-tree), evaluate on each location update"
+        ],
+        [
+         "ETA / routing",
+         "Road graph + contraction hierarchies + live traffic"
+        ],
+        [
+         "Heatmaps",
+         "Aggregate counts per H3 cell"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Find restaurants within 2 km quickly.",
+         "a": "Choose geohash precision ~5–6, query the cell + neighbours, filter by exact haversine distance, sort; cache hot areas."
+        },
+        {
+         "q": "Why are hexagons better than squares?",
+         "a": "All 6 neighbours are the same distance from the centre, so k-ring distance approximates radius evenly and aggregation is smoother."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "probabilistic",
+   "category": "Specialized",
+   "title": "Probabilistic Data Structures",
+   "summary": "Trade a little accuracy for huge memory savings: Bloom filters for set membership, HyperLogLog for distinct counts, Count-Min sketch for frequencies, and top-K heavy hitters.",
+   "sections": [
+    {
+     "id": "bloom",
+     "title": "Bloom filter",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Bit array of m bits + k hash functions. Insert: set k bits. Query: if any bit is 0 → **definitely not present**; if all are 1 → **probably present**.",
+        "No false negatives; false-positive rate p ≈ (1 − e^(−kn/m))^k. About **9.6 bits per element for 1% FP**, ~14.4 bits for 0.1%.",
+        "Can't delete (use a counting Bloom filter or Cuckoo filter)."
+       ]
+      },
+      {
+       "t": "table",
+       "head": [
+        "Used for",
+        "Why"
+       ],
+       "rows": [
+        [
+         "LSM SSTables",
+         "Skip files that can't contain the key"
+        ],
+        [
+         "Web crawler seen-URLs",
+         "Billions of URLs in GBs"
+        ],
+        [
+         "CDN / cache",
+         "Avoid caching one-hit wonders"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "hll",
+     "title": "HyperLogLog",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "Estimates the number of distinct elements using ~12 KB per counter (Redis PFADD/PFCOUNT) with ~0.8% standard error, for any cardinality. Hash each element, use the first bits to pick a register, and record the longest run of leading zeros. HLLs **merge** by taking the max per register — perfect for daily-unique-users rolled up into monthly."
+      }
+     ]
+    },
+    {
+     "id": "cms",
+     "title": "Count-Min sketch",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "A d × w table of counters with d hash functions. Increment one counter per row; estimate = min over rows.",
+        "Overestimates (collisions) but never underestimates; error ≈ total/w with probability 1 − e^(−d).",
+        "Combine with a min-heap of size K to track **top-K heavy hitters** in a stream."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "choose",
+     "title": "Which one?",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Question",
+        "Structure"
+       ],
+       "rows": [
+        [
+         "Have I seen this item?",
+         "Bloom / Cuckoo filter"
+        ],
+        [
+         "How many distinct items?",
+         "HyperLogLog"
+        ],
+        [
+         "How often has this item appeared?",
+         "Count-Min sketch"
+        ],
+        [
+         "Which items are most frequent?",
+         "Count-Min + heap, or Space-Saving"
+        ],
+        [
+         "Approximate quantiles (p99)?",
+         "t-digest / DDSketch"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "questions",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "Size a Bloom filter for 1B items at 1% FP.",
+         "a": "≈ 9.6 Gbit ≈ 1.2 GB with ~7 hash functions."
+        },
+        {
+         "q": "Why not use a hash set for distinct users?",
+         "a": "Exact sets cost memory proportional to cardinality (GBs per counter at scale); HLL is fixed 12 KB and mergeable."
+        },
+        {
+         "q": "Can you merge Count-Min sketches?",
+         "a": "Yes — element-wise addition, as long as they share dimensions and hash functions."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "vector-search",
+   "category": "Specialized",
+   "title": "Vector Search & Embeddings",
+   "summary": "Search by meaning: embeddings, similarity metrics, approximate nearest-neighbour indexes (HNSW, IVF, PQ), hybrid keyword + vector retrieval and how it powers RAG and recommendations.",
+   "sections": [
+    {
+     "id": "embeddings",
+     "title": "Embeddings",
+     "blocks": [
+      {
+       "t": "p",
+       "text": "An embedding model maps text, images or users to dense vectors (e.g. 768–3,072 dimensions) where semantically similar items are close. Similarity is usually cosine similarity or dot product on normalised vectors."
+      }
+     ]
+    },
+    {
+     "id": "ann",
+     "title": "Approximate nearest neighbour",
+     "blocks": [
+      {
+       "t": "compare",
+       "cols": [
+        {
+         "title": "Exact (brute force)",
+         "pros": [
+          "Perfect recall",
+          "Fine up to ~1M vectors on GPU/SIMD"
+         ],
+         "cons": [
+          "O(n·d) per query"
+         ]
+        },
+        {
+         "title": "HNSW graph",
+         "pros": [
+          "High recall, very fast queries",
+          "Incremental inserts"
+         ],
+         "cons": [
+          "Memory-heavy (vectors + graph links in RAM)"
+         ]
+        },
+        {
+         "title": "IVF + PQ",
+         "pros": [
+          "Clusters + compressed codes → billions of vectors",
+          "Small memory"
+         ],
+         "cons": [
+          "Lower recall; needs training; tune nprobe"
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "hybrid",
+     "title": "Hybrid retrieval",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Keyword search (BM25) catches exact terms, names and IDs that embeddings blur.",
+        "Run both, merge with reciprocal rank fusion, then re-rank the top results with a cross-encoder.",
+        "Apply metadata filters (tenant, date, permissions) before or during the ANN search — post-filtering can return too few results."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "ops",
+     "title": "Operating a vector index",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "Chunk documents (~200–800 tokens with overlap) before embedding.",
+        "Re-embedding is required when the model changes — version the index.",
+        "Shard by tenant or by hash; replicate for QPS.",
+        "Options: pgvector, OpenSearch/Elasticsearch, Pinecone, Weaviate, Milvus, FAISS (library)."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "questions",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "How do you measure ANN quality?",
+         "a": "Recall@k against brute-force results on a sample, traded against latency."
+        },
+        {
+         "q": "Why not only vectors for search?",
+         "a": "Embeddings miss exact matches (error codes, SKUs); hybrid retrieval fixes that."
+        },
+        {
+         "q": "How do you enforce document permissions in RAG?",
+         "a": "Store ACL metadata with each chunk and filter by the user's groups during retrieval, never after generation."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ops-security",
+   "title": "Observability & Security",
+   "category": "Operations",
+   "summary": "Metrics, logs and traces to see the system; auth, TLS and secrets to protect it.",
+   "sections": [
+    {
+     "id": "observe",
+     "title": "Observability",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "**RED** per service: Rate, Errors, Duration. **USE** per resource: Utilization, Saturation, Errors.",
+        "Track p50/p95/p99, not averages.",
+        "Structured logs with trace IDs; distributed tracing via OpenTelemetry.",
+        "Alert on SLO burn rate and user-facing symptoms."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "security",
+     "title": "Security",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "AuthN: OAuth 2.0 / OIDC, short-lived JWT access tokens + refresh tokens.",
+        "AuthZ: RBAC or ABAC enforced in each service.",
+        "TLS everywhere, mTLS between services; encryption at rest with KMS.",
+        "Secrets in Vault / Secrets Manager; rotate them.",
+        "WAF, rate limits, input validation, parameterized queries."
+       ],
+       "ordered": false
+      }
+     ]
+    },
+    {
+     "id": "slo",
+     "title": "SLIs, SLOs and error budgets",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "SLI: measured good events ÷ valid events (e.g. requests < 300 ms and non-5xx).",
+        "SLO: target over a window (99.9% over 30 days → 43 min of budget).",
+        "Error budget policy: when burning fast, freeze risky launches and fix reliability.",
+        "Alert on burn rate (e.g. 14× burn over 1 h and 6× over 6 h) instead of static thresholds."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "observability-deep",
+     "title": "Metrics, logs, traces",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Signal",
+        "Tools",
+        "Use"
+       ],
+       "rows": [
+        [
+         "Metrics",
+         "Prometheus, Datadog, CloudWatch",
+         "Dashboards, alerting; watch cardinality"
+        ],
+        [
+         "Logs",
+         "ELK/OpenSearch, Loki, Splunk",
+         "Debugging; structured JSON with trace_id"
+        ],
+        [
+         "Traces",
+         "OpenTelemetry → Jaeger/Tempo/X-Ray",
+         "Latency breakdown across services"
+        ],
+        [
+         "Profiles",
+         "Continuous profilers",
+         "CPU/memory hotspots"
+        ]
+       ]
+      },
+      {
+       "t": "list",
+       "items": [
+        "Golden signals: latency, traffic, errors, saturation.",
+        "Percentiles from histograms, never averages of percentiles."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "authn",
+     "title": "Authentication and authorization",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "OAuth 2.0 authorization code + PKCE for apps; client credentials for service-to-service; OIDC adds identity (ID token).",
+        "JWT: stateless and fast to verify, but hard to revoke → short expiry + refresh tokens + denylist for emergencies.",
+        "Sessions in Redis: easy revocation, one lookup per request.",
+        "AuthZ models: RBAC (roles), ABAC (attributes/policies, OPA), ReBAC (relationships, Google Zanzibar / SpiceDB) for sharing like Google Docs.",
+        "mTLS + service identity (SPIFFE) inside the mesh."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "security-deep",
+     "title": "Security checklist",
+     "blocks": [
+      {
+       "t": "table",
+       "head": [
+        "Area",
+        "Control"
+       ],
+       "rows": [
+        [
+         "Transport",
+         "TLS 1.2+ everywhere, HSTS, mTLS internally"
+        ],
+        [
+         "Data at rest",
+         "KMS envelope encryption; per-tenant keys for sensitive data"
+        ],
+        [
+         "Secrets",
+         "Vault / Secrets Manager, rotation, never in code or images"
+        ],
+        [
+         "Input",
+         "Validation, parameterized queries, output encoding (XSS), CSRF tokens"
+        ],
+        [
+         "Edge",
+         "WAF, rate limits, bot detection, DDoS protection"
+        ],
+        [
+         "Audit",
+         "Immutable audit logs for sensitive actions"
+        ],
+        [
+         "Privacy",
+         "PII minimization, data residency, deletion workflows (GDPR/DPDP)"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "deploy",
+     "title": "Safe deployment",
+     "blocks": [
+      {
+       "t": "list",
+       "items": [
+        "CI/CD with automated tests; canary (1% → 10% → 100%) with automated rollback on SLO regression.",
+        "Feature flags decouple deploy from release.",
+        "Blue/green for fast rollback; expand–contract for schema changes.",
+        "Infrastructure as code (Terraform), immutable images."
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interview-qs",
+     "title": "Interview questions",
+     "blocks": [
+      {
+       "t": "qa",
+       "items": [
+        {
+         "q": "How do you revoke a JWT immediately?",
+         "a": "Short TTL plus a denylist (jti in Redis) checked at the gateway, or switch to opaque tokens with introspection."
+        },
+        {
+         "q": "How do you implement Google Docs-style sharing permissions?",
+         "a": "ReBAC: tuples like (doc:1#editor@user:42), check API evaluates relationships including groups and folders — Zanzibar model."
+        },
+        {
+         "q": "What do you alert on?",
+         "a": "User-facing symptoms against SLOs (error rate, latency burn), not every CPU spike; page only on actionable alerts."
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

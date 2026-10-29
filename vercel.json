@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    { "source": "/atlas", "destination": "/index.html" },
+    { "source": "/atlas/(.*)", "destination": "/index.html" },
+    { "source": "/system-design", "destination": "/index.html" },
+    { "source": "/system-design/(.*)", "destination": "/index.html" }
+  ]
+}

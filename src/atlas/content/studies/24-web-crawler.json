@@ -1,0 +1,348 @@
+{
+ "id": "web-crawler",
+ "num": 24,
+ "title": "Web Crawler",
+ "summary": "Crawl billions of pages politely: a prioritised URL frontier with per-host queues, robots.txt and rate limits, distributed fetchers, content dedup, and a pipeline that feeds the index.",
+ "tags": [
+  "Frontier",
+  "Politeness",
+  "Dedup",
+  "Bloom filters"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "probabilistic",
+  "queues-kafka",
+  "blob",
+  "search",
+  "rate-limiting"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Start from seed URLs, fetch pages, extract links, repeat"
+      ],
+      [
+       "Functional",
+       "Store raw HTML (and extracted text) for indexing"
+      ],
+      [
+       "Functional",
+       "Re-crawl pages based on how often they change"
+      ],
+      [
+       "Non-functional",
+       "Politeness: obey robots.txt; never overload one host"
+      ],
+      [
+       "Non-functional",
+       "Scale to billions of pages per month; robust to traps and bad HTML"
+      ],
+      [
+       "Non-functional",
+       "Don't crawl the same URL or near-identical content twice"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Pages",
+       "value": "1B / month",
+       "sub": "~400 pages/s avg"
+      },
+      {
+       "label": "Peak",
+       "value": "~1k–2k/s",
+       "sub": "allow headroom"
+      },
+      {
+       "label": "Page size",
+       "value": "~100 KB",
+       "sub": "HTML"
+      },
+      {
+       "label": "Storage",
+       "value": "~100 TB / month",
+       "sub": "raw, compress ~5×"
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Bandwidth ~ 400 × 100 KB ≈ 40 MB/s average. The hard part isn't throughput, it's politeness and dedup at billions of URLs."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Seed URLs",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "URL frontier",
+        "kind": "queue",
+        "sub": "priority + per-host queues"
+       }
+      ],
+      [
+       {
+        "label": "Fetchers",
+        "kind": "service",
+        "sub": "async HTTP, DNS cache"
+       },
+       {
+        "label": "robots.txt cache",
+        "kind": "cache"
+       }
+      ],
+      [
+       {
+        "label": "Parser / extractor",
+        "kind": "service"
+       },
+       {
+        "label": "Content store",
+        "kind": "store",
+        "sub": "raw HTML"
+       }
+      ],
+      [
+       {
+        "label": "URL filter + dedup",
+        "kind": "service",
+        "sub": "seen-URL set, content hash"
+       },
+       {
+        "label": "Indexing pipeline",
+        "kind": "queue"
+       }
+      ]
+     ],
+     "caption": "Crawl loop"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Fetchers take URLs from the frontier, respecting each host's crawl delay.",
+      "Raw pages go to blob storage; a message with the location goes to the parser.",
+      "The parser extracts links, normalises them, drops ones already seen, and enqueues the rest with a priority."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "deep-frontier",
+   "title": "Deep dive: the URL frontier and politeness",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Front queues (priority)",
+       "text": "Score URLs by PageRank-ish importance, freshness need, and depth; higher-priority queues are drained more often."
+      },
+      {
+       "title": "Router",
+       "text": "Hash the host to one of many back queues, so every host lives in exactly one queue."
+      },
+      {
+       "title": "Back queues (politeness)",
+       "text": "Each back queue is served by one worker at a time; a heap of (next_allowed_time, queue) enforces per-host delay."
+      },
+      {
+       "title": "Re-crawl",
+       "text": "Pages that changed on the last visit get re-scheduled sooner; static pages decay to weeks."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Politeness is enforced structurally: one queue per host, one in-flight request per host, and a min-heap of next allowed fetch times. That's the classic Mercator frontier design."
+    }
+   ]
+  },
+  {
+   "id": "deep-dedup",
+   "title": "Deep dive: dedup and traps",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**URL dedup:** normalise (lowercase host, strip fragments, sort query params), then check a seen-set. At billions of URLs a **Bloom filter** in memory gives a fast \"definitely new\" answer; a false positive only means skipping one URL.",
+      "**Content dedup:** hash the page body for exact duplicates; use **SimHash** / MinHash fingerprints for near-duplicates (mirrors, boilerplate changes).",
+      "**Crawler traps:** infinite calendars and session-id URLs — cap depth and URL length, cap pages per host, and detect repeating path patterns.",
+      "**DNS:** cache aggressively; DNS lookups are a surprising bottleneck at crawl scale."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Keeping the seen-URL set in a SQL table and querying it per link. With ~50 links per page and thousands of pages per second that's 100k+ lookups/s — use an in-memory probabilistic filter backed by a sharded KV store."
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Partition the frontier and seen-set by host hash, so a worker owns whole hosts — politeness stays local, no global coordination.",
+      "Checkpoint frontier state; a crashed worker's hosts are reassigned and resumed.",
+      "Timeouts and size limits on fetches; treat slow hosts as lower priority.",
+      "Handle JavaScript-heavy sites with a separate, much more expensive headless-browser rendering tier."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "BFS from seeds",
+       "pros": [
+        "Simple",
+        "Finds important pages early"
+       ],
+       "cons": [
+        "Hammers popular hosts without a politeness layer"
+       ]
+      },
+      {
+       "title": "Prioritised frontier",
+       "pros": [
+        "Spends budget on valuable / changing pages"
+       ],
+       "cons": [
+        "Needs scoring signals and more state"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The frontier is two-level: priority queues decide what to crawl, per-host queues decide when. Dedup is a Bloom filter for URLs and fingerprints for content."
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "Scale, freshness, HTML only or rendering, politeness rules."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Pages/s, bandwidth, storage."
+      },
+      {
+       "min": "10–20",
+       "title": "HLD",
+       "text": "Frontier → fetchers → store → parser → dedup → frontier."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "Politeness queues, Bloom filter, SimHash, traps."
+      },
+      {
+       "min": "35–45",
+       "title": "Scale",
+       "text": "Partition by host, checkpoints, rendering tier."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you decide re-crawl frequency?",
+       "a": "Track change rate per page (hash differs between visits) and schedule proportionally, bounded by importance."
+      },
+      {
+       "q": "How do you crawl only part of the web, e.g. news?",
+       "a": "Seed with news sites and sitemaps, and score URLs by topic/host allow-lists."
+      },
+      {
+       "q": "What if a host's robots.txt changes?",
+       "a": "Cache it with a TTL (e.g. 24 h) and re-fetch; treat fetch failure conservatively."
+      },
+      {
+       "q": "How big is the Bloom filter for 10B URLs at 1% FP?",
+       "a": "About 9.6 bits per element → ~12 GB, shardable across machines."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Frontier = priority queues + per-host back queues + next-fetch heap.",
+      "Normalise URLs; Bloom filter for seen-set.",
+      "SimHash for near-duplicate content.",
+      "Partition everything by host.",
+      "Cap depth/pages per host to escape traps."
+     ]
+    }
+   ]
+  }
+ ]
+}

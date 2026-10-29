@@ -1,0 +1,280 @@
+{
+ "minutes": 16,
+ "sections": [
+  {
+   "id": "acid",
+   "title": "ACID in plain words",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Letter",
+      "Meaning",
+      "How databases provide it"
+     ],
+     "rows": [
+      [
+       "Atomicity",
+       "All of a transaction's writes happen, or none",
+       "Undo/redo via the write-ahead log"
+      ],
+      [
+       "Consistency",
+       "Constraints (FKs, uniques, checks) hold before and after",
+       "Constraint checks at commit"
+      ],
+      [
+       "Isolation",
+       "Concurrent transactions don't see each other's partial work",
+       "Locks and/or MVCC snapshots"
+      ],
+      [
+       "Durability",
+       "Committed data survives crashes",
+       "WAL fsync (and replication)"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "anomalies",
+   "title": "The anomalies isolation prevents",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Anomaly",
+      "What happens"
+     ],
+     "rows": [
+      [
+       "Dirty read",
+       "Reading another transaction's uncommitted data"
+      ],
+      [
+       "Non-repeatable read",
+       "Reading the same row twice gives different values"
+      ],
+      [
+       "Phantom",
+       "Re-running a range query returns new rows"
+      ],
+      [
+       "Lost update",
+       "Two read-modify-write cycles; one overwrites the other"
+      ],
+      [
+       "Write skew",
+       "Two transactions read overlapping data, write different rows, and together violate an invariant (two doctors both go off call)"
+      ]
+     ]
+    },
+    {
+     "t": "table",
+     "head": [
+      "Isolation level",
+      "Prevents",
+      "Still allows"
+     ],
+     "rows": [
+      [
+       "Read Committed (Postgres default)",
+       "Dirty reads",
+       "Non-repeatable reads, lost updates, write skew"
+      ],
+      [
+       "Repeatable Read / Snapshot (MVCC)",
+       "+ non-repeatable reads (and phantoms in Postgres)",
+       "Write skew"
+      ],
+      [
+       "Serializable (SSI in Postgres)",
+       "Everything",
+       "— (but transactions may abort and must be retried)"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "lost-update",
+   "title": "The lost-update problem, step by step",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Txn A",
+      "Database",
+      "Txn B"
+     ],
+     "steps": [
+      {
+       "from": "Txn A",
+       "to": "Database",
+       "label": "SELECT stock → 5"
+      },
+      {
+       "from": "Txn B",
+       "to": "Database",
+       "label": "SELECT stock → 5"
+      },
+      {
+       "from": "Txn A",
+       "to": "Database",
+       "label": "UPDATE stock = 4"
+      },
+      {
+       "from": "Txn B",
+       "to": "Database",
+       "label": "UPDATE stock = 4",
+       "note": "should be 3!"
+      },
+      {
+       "from": "Database",
+       "to": "Txn A",
+       "label": "both commit",
+       "note": "one sale lost",
+       "dashed": true
+      }
+     ],
+     "caption": "Two transactions decrement the same stock count"
+    },
+    {
+     "t": "table",
+     "head": [
+      "Fix",
+      "SQL",
+      "Notes"
+     ],
+     "rows": [
+      [
+       "Atomic update",
+       "UPDATE items SET stock = stock - 1 WHERE id = 7 AND stock > 0",
+       "Best when the logic fits in one statement"
+      ],
+      [
+       "Pessimistic lock",
+       "SELECT … FOR UPDATE, then UPDATE",
+       "Second transaction waits; hold the lock briefly"
+      ],
+      [
+       "Optimistic (version)",
+       "UPDATE … SET stock = 4, version = 8 WHERE id = 7 AND version = 7",
+       "0 rows updated → reload and retry"
+      ],
+      [
+       "Serializable isolation",
+       "Run both at SERIALIZABLE",
+       "DB detects the conflict and aborts one"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "mvcc",
+   "title": "How MVCC works",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Multi-version concurrency control keeps old versions of rows. Each transaction reads from a snapshot as of its start (or each statement's start), so **readers never block writers and writers never block readers**. Writers to the same row still conflict. Old versions are cleaned up later (VACUUM in Postgres). This is why long-running transactions are harmful — they pin old versions and bloat tables."
+    }
+   ]
+  },
+  {
+   "id": "pess-opt",
+   "title": "Pessimistic vs optimistic concurrency",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Pessimistic (locks)",
+       "pros": [
+        "No wasted work under heavy contention",
+        "Simple mental model"
+       ],
+       "cons": [
+        "Waiting, deadlocks, lower throughput",
+        "Never hold locks across user think time"
+       ]
+      },
+      {
+       "title": "Optimistic (version check / CAS)",
+       "pros": [
+        "No locks held; great when conflicts are rare",
+        "Works across requests (ETags, If-Match)"
+       ],
+       "cons": [
+        "Retries under contention; starvation possible"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Tip",
+     "text": "For a web flow where the user edits a form for minutes, use optimistic concurrency with a version number (or HTTP ETag + If-Match). For a hot counter updated by many workers, use an atomic UPDATE or a pessimistic lock."
+    }
+   ]
+  },
+  {
+   "id": "deadlocks",
+   "title": "Deadlocks",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Transaction A locks row 1 then wants row 2; B locks row 2 then wants row 1 — both wait forever.",
+      "Databases detect cycles and abort one transaction; the application must retry.",
+      "Prevent by always acquiring locks in a consistent order (e.g. by id) and keeping transactions short."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "distributed",
+   "title": "Distributed transactions and locks",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Two-phase commit (2PC)",
+       "pros": [
+        "Atomic across databases"
+       ],
+       "cons": [
+        "Blocking if the coordinator fails mid-protocol; slow; locks held across the network"
+       ]
+      },
+      {
+       "title": "Sagas",
+       "pros": [
+        "Each step commits locally; compensations undo",
+        "Available and scalable"
+       ],
+       "cons": [
+        "No isolation between steps; compensations must be designed"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Distributed locks (Redis SET NX PX, ZooKeeper/etcd leases) coordinate work across machines, but **leases can expire while the holder is paused**. Protect the resource with **fencing tokens**: each lock grant gets a monotonically increasing number and the storage rejects writes carrying an older token."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd avoid distributed transactions: do the critical write as one local transaction with a conditional update, publish an event via the outbox, and let downstream steps run as a saga with compensations."
+    }
+   ]
+  }
+ ]
+}

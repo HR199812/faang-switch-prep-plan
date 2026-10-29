@@ -1,0 +1,211 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "problem",
+   "title": "What consensus solves",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Consensus lets a group of machines agree on a value — or a sequence of values — even when some of them crash or messages are delayed. Once agreed, the decision never changes. Agreeing on a sequence of commands gives you a **replicated log**, and a replicated log applied in order on every node gives you a **replicated state machine**: a fault-tolerant database, lock service or configuration store."
+    },
+    {
+     "t": "table",
+     "head": [
+      "You need consensus for…",
+      "Example"
+     ],
+     "rows": [
+      [
+       "Leader election",
+       "Exactly one scheduler / primary at a time"
+      ],
+      [
+       "Distributed locks with correctness",
+       "etcd / ZooKeeper locks with fencing"
+      ],
+      [
+       "Cluster membership & config",
+       "Kubernetes stores all cluster state in etcd"
+      ],
+      [
+       "Strongly consistent replication",
+       "Spanner, CockroachDB, TiKV (Raft per range), Kafka KRaft"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Consensus needs a **majority** (quorum): a cluster of 2f + 1 nodes tolerates f failures. 3 nodes survive 1 failure, 5 survive 2. That's why clusters have odd sizes."
+    }
+   ]
+  },
+  {
+   "id": "raft",
+   "title": "Raft in four ideas",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Terms",
+       "text": "Time is divided into numbered terms; each term has at most one leader."
+      },
+      {
+       "title": "Leader election",
+       "text": "Followers that stop hearing heartbeats become candidates, increment the term and request votes; a candidate with a majority becomes leader. Randomised timeouts avoid split votes."
+      },
+      {
+       "title": "Log replication",
+       "text": "Clients send commands to the leader, which appends them and replicates to followers; an entry is committed once a majority has stored it."
+      },
+      {
+       "title": "Safety",
+       "text": "A node only votes for candidates whose log is at least as up to date as its own, so a new leader always has every committed entry."
+      }
+     ]
+    },
+    {
+     "t": "seq",
+     "actors": [
+      "Client",
+      "Leader",
+      "Follower 1",
+      "Follower 2"
+     ],
+     "steps": [
+      {
+       "from": "Client",
+       "to": "Leader",
+       "label": "SET x = 5"
+      },
+      {
+       "from": "Leader",
+       "to": "Follower 1",
+       "label": "AppendEntries(term 4, idx 17)"
+      },
+      {
+       "from": "Leader",
+       "to": "Follower 2",
+       "label": "AppendEntries(term 4, idx 17)"
+      },
+      {
+       "from": "Follower 1",
+       "to": "Leader",
+       "label": "ok",
+       "note": "majority (2 of 3) reached",
+       "dashed": true
+      },
+      {
+       "from": "Leader",
+       "to": "Leader",
+       "label": "commit idx 17, apply"
+      },
+      {
+       "from": "Leader",
+       "to": "Client",
+       "label": "OK",
+       "dashed": true
+      },
+      {
+       "from": "Follower 2",
+       "to": "Leader",
+       "label": "ok (late)",
+       "note": "still fine",
+       "dashed": true
+      }
+     ],
+     "caption": "Committing one entry in a 3-node Raft cluster"
+    }
+   ]
+  },
+  {
+   "id": "partition",
+   "title": "What happens in a partition",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "The side with a majority keeps (or elects) a leader and continues to commit.",
+      "An old leader on the minority side can't reach a majority, so its writes never commit; when it hears a higher term it steps down.",
+      "Clients talking to the minority side get errors or timeouts — consensus systems are **CP**."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Reading from a leader without checking it's still the leader. A deposed leader can serve stale reads. Use read-index / lease reads (etcd linearizable reads) or route reads through the log."
+    }
+   ]
+  },
+  {
+   "id": "systems",
+   "title": "Paxos, Raft, ZAB and where you meet them",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Protocol",
+      "Used by",
+      "Notes"
+     ],
+     "rows": [
+      [
+       "Paxos / Multi-Paxos",
+       "Chubby, Spanner",
+       "The original; notoriously hard to implement"
+      ],
+      [
+       "Raft",
+       "etcd, Consul, CockroachDB, TiKV, Kafka KRaft",
+       "Designed for understandability; most new systems"
+      ],
+      [
+       "ZAB",
+       "ZooKeeper",
+       "Similar to Raft; atomic broadcast"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "using",
+   "title": "Using a coordination service instead of implementing consensus",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Leader election:** create an ephemeral key with a lease (etcd) or an ephemeral sequential node (ZooKeeper); the holder of the lowest / existing key is leader.",
+      "**Locks with fencing:** etcd returns a revision number with each lease grant — use it as a fencing token.",
+      "**Service discovery and config:** watch keys for changes.",
+      "Keep data small (KB–MB): coordination services aren't general databases, and every write goes through consensus."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I wouldn't implement consensus; I'd use etcd or ZooKeeper for leader election and store a fencing token so a stale leader's writes are rejected."
+    }
+   ]
+  },
+  {
+   "id": "cost",
+   "title": "The cost of consensus",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Every write needs a round trip to a majority: within a region ~1–2 ms; across regions 50–150 ms.",
+      "Throughput is bounded by the leader; scale by partitioning into many consensus groups (Raft per range/shard).",
+      "Clock-free correctness, but **leases** (for fast reads) do assume bounded clock drift."
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,252 @@
+{
+ "minutes": 16,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Why put a queue in the middle",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "A message queue decouples a producer from a consumer in time and in capacity. The producer hands off work and returns immediately; consumers process at their own pace. This absorbs traffic spikes (the queue fills, workers catch up), isolates failures (a slow email provider doesn't slow checkout), and lets you add new consumers without changing producers."
+    },
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Synchronous call",
+       "pros": [
+        "Immediate result",
+        "Simple to trace"
+       ],
+       "cons": [
+        "Caller waits; callee outages propagate",
+        "Spikes hit the callee directly"
+       ]
+      },
+      {
+       "title": "Via a queue",
+       "pros": [
+        "Load levelling, retries, fan-out",
+        "Producer stays fast"
+       ],
+       "cons": [
+        "Eventual processing; duplicates; harder debugging"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "types",
+   "title": "Queue vs log",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Message queue (SQS, RabbitMQ)",
+       "pros": [
+        "Each message delivered to one consumer, then deleted",
+        "Per-message ack, visibility timeouts, DLQs",
+        "Great for task distribution"
+       ],
+       "cons": [
+        "No replay once consumed",
+        "Ordering limited (FIFO queues are slower)"
+       ]
+      },
+      {
+       "title": "Distributed log (Kafka, Kinesis, Pulsar)",
+       "pros": [
+        "Messages retained for days; many consumer groups read independently",
+        "Ordered per partition; replayable",
+        "Huge throughput"
+       ],
+       "cons": [
+        "Consumer tracks offsets; per-message retry is awkward",
+        "Parallelism capped by partition count"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "kafka",
+   "title": "How Kafka works",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Producers",
+        "kind": "client",
+        "sub": "key → partition"
+       }
+      ],
+      [
+       {
+        "label": "Partition 0",
+        "kind": "queue",
+        "sub": "leader on broker 1"
+       },
+       {
+        "label": "Partition 1",
+        "kind": "queue",
+        "sub": "leader on broker 2"
+       },
+       {
+        "label": "Partition 2",
+        "kind": "queue",
+        "sub": "leader on broker 3"
+       }
+      ],
+      [
+       {
+        "label": "Consumer group A",
+        "kind": "service",
+        "sub": "billing: 3 consumers"
+       },
+       {
+        "label": "Consumer group B",
+        "kind": "service",
+        "sub": "analytics: 1 consumer"
+       }
+      ]
+     ],
+     "caption": "Topic with 3 partitions, replicated across brokers"
+    },
+    {
+     "t": "list",
+     "items": [
+      "A **topic** is split into **partitions**; each partition is an append-only log with sequential **offsets**.",
+      "Producers choose the partition by hashing the message key — all events for one key (an order, a user) land in one partition, **in order**.",
+      "Each partition has a leader and followers (replication factor 3). `acks=all` waits for the in-sync replicas.",
+      "A **consumer group** shares partitions among its members: each partition is read by exactly one consumer in the group. Different groups read the same data independently.",
+      "Consumers commit offsets; after a crash, a consumer resumes from the last committed offset."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "delivery",
+   "title": "Delivery semantics",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Semantics",
+      "How you get it",
+      "Risk"
+     ],
+     "rows": [
+      [
+       "At-most-once",
+       "Commit offset before processing",
+       "Messages lost on crash"
+      ],
+      [
+       "At-least-once (default)",
+       "Process, then commit offset",
+       "Duplicates after a crash between process and commit"
+      ],
+      [
+       "Exactly-once (within Kafka)",
+       "Idempotent producer + transactions (read-process-write)",
+       "Only covers Kafka-to-Kafka; external side effects still need idempotency"
+      ]
+     ]
+    },
+    {
+     "t": "seq",
+     "actors": [
+      "Kafka",
+      "Consumer",
+      "Database"
+     ],
+     "steps": [
+      {
+       "from": "Kafka",
+       "to": "Consumer",
+       "label": "msg @ offset 42"
+      },
+      {
+       "from": "Consumer",
+       "to": "Database",
+       "label": "INSERT payment p_42"
+      },
+      {
+       "from": "Consumer",
+       "to": "Consumer",
+       "label": "crash ✕",
+       "note": "before committing offset 43"
+      },
+      {
+       "from": "Kafka",
+       "to": "Consumer",
+       "label": "msg @ offset 42 again",
+       "note": "after restart / rebalance"
+      },
+      {
+       "from": "Consumer",
+       "to": "Database",
+       "label": "INSERT p_42 → duplicate key",
+       "note": "idempotent write absorbs it",
+       "dashed": true
+      }
+     ],
+     "caption": "Why at-least-once produces duplicates"
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Assume at-least-once and make consumers idempotent: upsert by a natural key, or record processed message ids."
+    }
+   ]
+  },
+  {
+   "id": "ordering",
+   "title": "Ordering and parallelism",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Order is guaranteed only **within a partition**. Choose the key so that events needing order share it.",
+      "Consumers in a group ≤ partitions; extra consumers sit idle. Plan partitions for peak parallelism (you can add partitions later, but keys remap).",
+      "Hot keys overload one partition — salt the key if strict per-key order isn't required."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failure",
+   "title": "Retries, DLQs and backpressure",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Transient failure: retry with backoff; in Kafka, use retry topics with delays (retry-1m, retry-10m) so one bad message doesn't block the partition.",
+      "Permanent failure (poison message): send to a **dead-letter queue** with the error, alert, and keep going.",
+      "Watch **consumer lag** (latest offset − committed offset) — it's the key health metric; autoscale consumers on it.",
+      "Retention lets you replay: fix a bug, reset the group's offsets, reprocess."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "interview",
+   "title": "Choosing in an interview",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "For order events I'd use Kafka keyed by order_id so each order's events stay ordered, with consumers that are idempotent because delivery is at-least-once. For background jobs like sending emails, a simple queue with a DLQ is enough."
+    }
+   ]
+  }
+ ]
+}

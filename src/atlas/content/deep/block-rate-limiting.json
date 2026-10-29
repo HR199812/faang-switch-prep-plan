@@ -1,0 +1,369 @@
+{
+ "minutes": 16,
+ "sections": [
+  {
+   "id": "why",
+   "title": "What rate limiting is for",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "A rate limiter caps how many requests a client can make in a period of time. It protects a service from abuse (scrapers, credential stuffing), from accidental overload (a buggy client in a retry loop), and enforces business rules (100 requests/min on the free tier). It's also how you share a scarce resource fairly — one noisy tenant shouldn't starve everyone else."
+    },
+    {
+     "t": "p",
+     "text": "Requests over the limit get rejected immediately with **HTTP 429 Too Many Requests**, ideally with headers telling the client when to retry. Rejecting early is far cheaper than doing the work and failing later."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Key (who is limited)",
+      "Example"
+     ],
+     "rows": [
+      [
+       "User / API key",
+       "1,000 req/hour per API key"
+      ],
+      [
+       "IP address",
+       "Login endpoint: 10 attempts/min per IP"
+      ],
+      [
+       "Tenant",
+       "Each workspace gets 5,000 req/min"
+      ],
+      [
+       "Endpoint",
+       "Expensive search: 10 req/s per user"
+      ],
+      [
+       "Global",
+       "Protect a downstream dependency: 2,000 req/s total"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "where",
+   "title": "Where the limiter sits",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Clients",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "CDN / WAF",
+        "kind": "edge",
+        "sub": "coarse per-IP limits, bot rules"
+       }
+      ],
+      [
+       {
+        "label": "API gateway",
+        "kind": "edge",
+        "sub": "per-key limits"
+       }
+      ],
+      [
+       {
+        "label": "Rate limit store",
+        "kind": "cache",
+        "sub": "Redis cluster"
+       },
+       {
+        "label": "Rules config",
+        "kind": "db",
+        "sub": "limits per plan / endpoint"
+       }
+      ],
+      [
+       {
+        "label": "Services",
+        "kind": "service",
+        "sub": "fine-grained / concurrency limits"
+       }
+      ]
+     ],
+     "caption": "Rate limit as early as possible"
+    },
+    {
+     "t": "p",
+     "text": "Coarse limits at the edge stop floods before they reach your infrastructure; precise per-user limits live in the gateway, which can read the API key; and services can add concurrency limits around especially expensive operations."
+    }
+   ]
+  },
+  {
+   "id": "algorithms",
+   "title": "The algorithms, with intuition",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "**Token bucket.** Picture a bucket that holds up to `capacity` tokens and is refilled at `rate` tokens per second. Each request takes one token; if the bucket is empty, the request is rejected. A full bucket allows a burst of `capacity` requests, after which traffic is smoothed to `rate`. You don't need a timer to refill — compute the refill lazily from the elapsed time when a request arrives."
+    },
+    {
+     "t": "code",
+     "lang": "js",
+     "text": "// Token bucket, refilled lazily\nfunction allow(bucket, now, rate /* tokens/s */, capacity) {\n  const elapsed = (now - bucket.updatedAt) / 1000;\n  bucket.tokens = Math.min(capacity, bucket.tokens + elapsed * rate);\n  bucket.updatedAt = now;\n  if (bucket.tokens < 1) return false;   // reject: 429\n  bucket.tokens -= 1;\n  return true;\n}"
+    },
+    {
+     "t": "p",
+     "text": "**Leaky bucket.** Requests join a FIFO queue that drains at a constant rate; if the queue is full, new requests are dropped. Output is perfectly smooth, which suits traffic shaping toward a fragile downstream, but bursts wait in line (adding latency) instead of being served immediately."
+    },
+    {
+     "t": "p",
+     "text": "**Fixed window counter.** Count requests per key per calendar window (e.g. per minute: key `user:42:12:05`). Cheap — one INCR + EXPIRE — but at window boundaries a client can send the full limit at 12:05:59 and again at 12:06:00: **2× the limit in two seconds**."
+    },
+    {
+     "t": "p",
+     "text": "**Sliding window log.** Store a timestamp per request (Redis sorted set), drop ones older than the window, count the rest. Exact, but memory grows with the limit (a 10k/hour limit stores 10k entries per user)."
+    },
+    {
+     "t": "p",
+     "text": "**Sliding window counter.** Keep counts for the current and previous fixed windows and weight the previous one by how much of it still overlaps the sliding window: `estimate = prev × (1 − elapsed/window) + current`. It's a near-exact approximation with two counters per key — the usual production choice alongside token bucket."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Algorithm",
+      "Memory / key",
+      "Bursts",
+      "Accuracy",
+      "Typical use"
+     ],
+     "rows": [
+      [
+       "Token bucket",
+       "2 numbers",
+       "Allows up to capacity",
+       "Exact for its model",
+       "API limits (AWS, Stripe)"
+      ],
+      [
+       "Leaky bucket",
+       "Queue",
+       "Smoothed out",
+       "Exact",
+       "Traffic shaping"
+      ],
+      [
+       "Fixed window",
+       "1 counter",
+       "2× at boundaries",
+       "Approximate",
+       "Simple quotas"
+      ],
+      [
+       "Sliding log",
+       "1 entry per request",
+       "None",
+       "Exact",
+       "Low limits, strict needs"
+      ],
+      [
+       "Sliding counter",
+       "2 counters",
+       "Minimal",
+       "~Exact",
+       "General purpose"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "distributed",
+   "title": "Making it work across many gateways",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "With 50 gateway instances, each one can't keep its own counter — a user would get 50× the limit. The counter has to be shared, and the check-and-increment must be **atomic**, or two instances will both read 99, both allow, and both write 100."
+    },
+    {
+     "t": "seq",
+     "actors": [
+      "Client",
+      "Gateway",
+      "Redis",
+      "Service"
+     ],
+     "steps": [
+      {
+       "from": "Client",
+       "to": "Gateway",
+       "label": "GET /search",
+       "note": "API key k1"
+      },
+      {
+       "from": "Gateway",
+       "to": "Redis",
+       "label": "EVALSHA token_bucket k1",
+       "note": "Lua: refill + take atomically"
+      },
+      {
+       "from": "Redis",
+       "to": "Gateway",
+       "label": "allowed, 37 left",
+       "dashed": true
+      },
+      {
+       "from": "Gateway",
+       "to": "Service",
+       "label": "forward request"
+      },
+      {
+       "from": "Service",
+       "to": "Gateway",
+       "label": "200 OK",
+       "dashed": true
+      },
+      {
+       "from": "Gateway",
+       "to": "Client",
+       "label": "200 + X-RateLimit-Remaining: 37",
+       "dashed": true
+      }
+     ],
+     "caption": "Atomic check-and-consume in Redis (one round trip)"
+    },
+    {
+     "t": "code",
+     "lang": "lua",
+     "text": "-- KEYS[1] = bucket key, ARGV = rate, capacity, now_ms\nlocal b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')\nlocal rate, cap, now = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])\nlocal tokens = tonumber(b[1]) or cap\nlocal ts = tonumber(b[2]) or now\ntokens = math.min(cap, tokens + (now - ts) / 1000 * rate)\nlocal allowed = tokens >= 1\nif allowed then tokens = tokens - 1 end\nredis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', now)\nredis.call('PEXPIRE', KEYS[1], math.ceil(cap / rate * 1000))\nreturn { allowed and 1 or 0, math.floor(tokens) }"
+    },
+    {
+     "t": "list",
+     "items": [
+      "**Shard Redis by limit key** (Redis Cluster hashes keys to slots) so throughput scales with nodes.",
+      "**Latency budget:** one Redis round trip (~0.5–1 ms in-region) per request. For extreme QPS, keep a small local token allowance per instance and sync with Redis in batches — slightly less accurate, far fewer calls.",
+      "**Clock source:** use Redis server time (`TIME`) or the caller's clock consistently, so instances with skewed clocks don't disagree."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failure",
+   "title": "Failure modes and choices you must make",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Fail open (allow when Redis is down)",
+       "pros": [
+        "The product keeps working"
+       ],
+       "cons": [
+        "No protection during the outage — the moment you may need it most"
+       ]
+      },
+      {
+       "title": "Fail closed (reject when Redis is down)",
+       "pros": [
+        "Protects downstreams"
+       ],
+       "cons": [
+        "Your limiter outage becomes a full outage"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Most public APIs **fail open** with a conservative per-instance local limit as a fallback.",
+      "Hot keys: one enormous tenant concentrates load on a single Redis shard — split its key (`tenant:7#0..7`) and divide the limit.",
+      "Multi-region: either per-region limits (simple, slightly generous) or asynchronously replicated counters (eventually consistent)."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Implementing the limit as GET, compare, then SET from the application. Without atomicity (Lua script, INCR, or MULTI), concurrent requests race and the limit leaks."
+    }
+   ]
+  },
+  {
+   "id": "responses",
+   "title": "Telling clients what happened",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "HTTP/1.1 429 Too Many Requests\nRetry-After: 12\nRateLimit-Limit: 100\nRateLimit-Remaining: 0\nRateLimit-Reset: 12"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Return `Retry-After` so well-behaved clients back off instead of hammering.",
+      "Clients should retry with **exponential backoff + jitter**; otherwise thousands of clients retry in lockstep.",
+      "Return remaining-quota headers on successful responses too, so clients can pace themselves.",
+      "Log and meter rejections per key — they're a product signal (who needs a higher plan) and a security signal."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "beyond",
+   "title": "Beyond request counts: adaptive limits and load shedding",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Fixed limits protect against misbehaving clients, but not against your own capacity dropping (a slow database, a bad deploy). **Adaptive concurrency limits** (e.g. Netflix's concurrency-limits library, based on TCP congestion control) watch latency and shrink the number of in-flight requests when latency rises."
+    },
+    {
+     "t": "list",
+     "items": [
+      "**Load shedding by priority:** under pressure, drop low-priority traffic (analytics, prefetch) first and keep checkout working.",
+      "**Concurrency limits** (max in-flight requests) are often better than rate limits for expensive endpoints, because cost varies per request.",
+      "**Cost-based limits:** charge different token amounts per operation (a search costs 10 tokens, a read costs 1) — GitHub's GraphQL API does this with query cost points."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "decide",
+   "title": "Putting it together in an interview",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Clarify",
+       "text": "Who is limited (user, IP, tenant)? Hard or soft limits? Single region or global?"
+      },
+      {
+       "title": "Pick an algorithm",
+       "text": "Token bucket if bursts are fine; sliding window counter if limits must be even."
+      },
+      {
+       "title": "Place it",
+       "text": "Edge for IP floods, gateway for API keys, service for concurrency."
+      },
+      {
+       "title": "Make it distributed",
+       "text": "Redis + Lua for atomic check-and-consume, sharded by key."
+      },
+      {
+       "title": "Handle failure",
+       "text": "Fail open with local fallback; 429 + Retry-After; client backoff with jitter."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd run a token bucket per API key in Redis, executed as a Lua script so refill-and-consume is atomic, sharded by key, failing open to a local limit if Redis is unavailable, and returning 429 with Retry-After."
+    }
+   ]
+  }
+ ]
+}

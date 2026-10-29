@@ -1,0 +1,250 @@
+{
+ "minutes": 14,
+ "sections": [
+  {
+   "id": "journey",
+   "title": "What happens when you type a URL",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Browser",
+      "DNS resolver",
+      "Edge / LB",
+      "App server"
+     ],
+     "steps": [
+      {
+       "from": "Browser",
+       "to": "DNS resolver",
+       "label": "A? app.example.com",
+       "note": "cached at OS, resolver, TTL"
+      },
+      {
+       "from": "DNS resolver",
+       "to": "Browser",
+       "label": "203.0.113.7 (anycast)",
+       "dashed": true
+      },
+      {
+       "from": "Browser",
+       "to": "Edge / LB",
+       "label": "TCP SYN / SYN-ACK / ACK",
+       "note": "1 RTT"
+      },
+      {
+       "from": "Browser",
+       "to": "Edge / LB",
+       "label": "TLS 1.3 ClientHello / ServerHello",
+       "note": "1 RTT"
+      },
+      {
+       "from": "Browser",
+       "to": "Edge / LB",
+       "label": "GET / (HTTP/2)"
+      },
+      {
+       "from": "Edge / LB",
+       "to": "App server",
+       "label": "forward (pooled connection)"
+      },
+      {
+       "from": "App server",
+       "to": "Edge / LB",
+       "label": "200 HTML",
+       "dashed": true
+      },
+      {
+       "from": "Edge / LB",
+       "to": "Browser",
+       "label": "200 HTML",
+       "dashed": true
+      }
+     ],
+     "caption": "First visit to https://app.example.com"
+    },
+    {
+     "t": "p",
+     "text": "Before the first byte of the response, the user has paid for a DNS lookup and two round trips. At 150 ms RTT that's ~300 ms of pure network setup — which is why edges near users, connection reuse, and HTTP/3's faster handshakes matter more than shaving server milliseconds."
+    }
+   ]
+  },
+  {
+   "id": "dns",
+   "title": "DNS in system design",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Records: A/AAAA (IP), CNAME (alias), MX, TXT; TTLs control caching.",
+      "**GeoDNS / latency-based routing:** return the IP of the nearest healthy region.",
+      "**Failover is slow:** resolvers and clients cache for the TTL (and some ignore low TTLs). Use anycast or a global load balancer for fast failover.",
+      "DNS is also a dependency that can fail — managed DNS providers are highly redundant for a reason."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tcp-udp",
+   "title": "TCP vs UDP",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "TCP",
+       "pros": [
+        "Reliable, ordered delivery; congestion control",
+        "What HTTP/1.1, HTTP/2, databases, gRPC use"
+       ],
+       "cons": [
+        "Handshake cost; head-of-line blocking: one lost packet delays everything behind it"
+       ]
+      },
+      {
+       "title": "UDP",
+       "pros": [
+        "No handshake, no retransmission delays",
+        "Ideal when late data is useless (voice, video, games)"
+       ],
+       "cons": [
+        "Apps handle loss/order themselves; often blocked by middleboxes"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "QUIC (HTTP/3) builds reliable, multiplexed streams on top of UDP, so a lost packet only stalls its own stream, and connections survive network changes (Wi-Fi → cellular)."
+    }
+   ]
+  },
+  {
+   "id": "tls",
+   "title": "TLS",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Provides encryption, integrity and server authentication (certificates signed by a CA).",
+      "TLS 1.3 needs one round trip to set up (0-RTT for resumed sessions, with replay caveats).",
+      "Terminate TLS at the edge/load balancer to offload CPU and centralise certificates; re-encrypt to backends or use mTLS internally."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "lb-layers",
+   "title": "Load balancing at layer 4 vs layer 7",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Users",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Anycast + DDoS protection",
+        "kind": "edge"
+       }
+      ],
+      [
+       {
+        "label": "L4 load balancer",
+        "kind": "edge",
+        "sub": "TCP/UDP, millions of conns"
+       }
+      ],
+      [
+       {
+        "label": "L7 proxies (Envoy / NGINX)",
+        "kind": "edge",
+        "sub": "TLS, routing, retries"
+       }
+      ],
+      [
+       {
+        "label": "Services",
+        "kind": "service"
+       }
+      ]
+     ],
+     "caption": "Typical edge stack"
+    },
+    {
+     "t": "table",
+     "head": [
+      "",
+      "L4",
+      "L7"
+     ],
+     "rows": [
+      [
+       "Sees",
+       "IP + port",
+       "Full HTTP request"
+      ],
+      [
+       "Routing by path/header",
+       "No",
+       "Yes"
+      ],
+      [
+       "TLS termination",
+       "Passthrough (usually)",
+       "Yes"
+      ],
+      [
+       "Cost per request",
+       "Very low",
+       "Higher"
+      ],
+      [
+       "Long-lived connections",
+       "Great",
+       "Fine, but balances per connection unless HTTP/2-aware"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "http-versions",
+   "title": "HTTP versions in practice",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**HTTP/1.1:** one request at a time per connection; browsers open ~6 per host.",
+      "**HTTP/2:** many concurrent streams over one TCP connection, header compression, server push (deprecated). Default for gRPC.",
+      "**HTTP/3:** HTTP/2 semantics over QUIC/UDP; better on lossy mobile networks."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Putting an L4 balancer in front of gRPC services. HTTP/2 multiplexes all requests over one long-lived connection, so L4 balancing sends everything from a client to one backend. Use an L7 (HTTP/2-aware) proxy or client-side load balancing."
+    }
+   ]
+  },
+  {
+   "id": "interview",
+   "title": "Useful one-liners",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Clients hit the nearest edge via anycast; TLS terminates there; an L7 proxy routes by path to services over pooled HTTP/2 connections; WebSockets go through an L4 balancer to a gateway tier."
+    }
+   ]
+  }
+ ]
+}

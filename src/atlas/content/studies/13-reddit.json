@@ -1,0 +1,404 @@
+{
+ "id": "reddit",
+ "num": 13,
+ "title": "Reddit",
+ "summary": "Community link aggregation: votes flow through queues into async score updates, hot/best rankings are precomputed per subreddit, listings are served from cache, and comment trees are stored and fetched as trees.",
+ "tags": [
+  "Voting",
+  "Ranking",
+  "Comment trees",
+  "Caching"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "caching",
+  "queues-kafka",
+  "databases",
+  "sharding"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Subreddits, posts, nested comments"
+      ],
+      [
+       "Functional",
+       "Up/down votes on posts and comments; sort by hot, new, top, best"
+      ],
+      [
+       "Functional",
+       "Front page (subscribed subreddits) and r/all"
+      ],
+      [
+       "Non-functional",
+       "Listing pages p99 < 200 ms; vote counts eventually consistent within seconds"
+      ],
+      [
+       "Non-functional",
+       "Very read-heavy; viral threads with 50k+ comments"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "DAU",
+       "value": "~70M+",
+       "sub": ""
+      },
+      {
+       "label": "Votes / s",
+       "value": "~50k",
+       "sub": "peak"
+      },
+      {
+       "label": "Page views / s",
+       "value": "~500k",
+       "sub": "peak"
+      },
+      {
+       "label": "Comments / day",
+       "value": "~10M",
+       "sub": ""
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Votes are the write hot spot and listings are the read hot spot. I'd make votes async and listings precomputed and cached."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "GET  /r/{sub}/hot?after=<cursor>&limit=25\nGET  /r/{sub}/comments/{postId}?sort=best&depth=8&limit=200\nPOST /api/vote         { thingId, dir: 1 | 0 | -1 }\nPOST /api/submit       { sub, title, url | body }\nPOST /api/comment      { parentId, body }"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Data",
+      "Key",
+      "Notes"
+     ],
+     "rows": [
+      [
+       "things (posts, comments)",
+       "thing_id",
+       "Reddit's original ThingDB: generic entity + key/value data tables in Postgres"
+      ],
+      [
+       "votes",
+       "(user_id, thing_id)",
+       "Direction; uniqueness prevents double votes"
+      ],
+      [
+       "listings",
+       "(sub, sort) → ordered list of post IDs",
+       "Precomputed, in cache (memcached/Redis)"
+      ],
+      [
+       "comment tree",
+       "post_id → parent→children structure",
+       "Cached per post and sort"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Clients",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "CDN",
+        "kind": "edge",
+        "sub": "logged-out pages"
+       },
+       {
+        "label": "API",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Listing cache",
+        "kind": "cache"
+       },
+       {
+        "label": "Vote queue",
+        "kind": "queue",
+        "sub": "partitioned by thing"
+       }
+      ],
+      [
+       {
+        "label": "Vote workers",
+        "kind": "service",
+        "sub": "count + rescore"
+       },
+       {
+        "label": "Comment service",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Postgres / Cassandra",
+        "kind": "db"
+       },
+       {
+        "label": "Search",
+        "kind": "store"
+       }
+      ]
+     ],
+     "caption": "Votes are queued; ranking workers update cached listings"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Vote → API records the user's vote (idempotent upsert) and enqueues `thing_id` — partitioned so one thing's votes are processed in order by one worker.",
+      "Worker updates counts, recomputes the hot score, and updates the subreddit's sorted listing in cache.",
+      "Listing reads come straight from cache; logged-out traffic is served from the CDN for seconds."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "ranking",
+   "title": "Deep dive: hot and best ranking",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "python",
+     "text": "from math import log10\ndef hot(ups, downs, created_epoch_s):\n    s = ups - downs\n    order = log10(max(abs(s), 1))\n    sign = 1 if s > 0 else -1 if s < 0 else 0\n    return round(sign * order + (created_epoch_s - 1134028003) / 45000, 7)"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Hot: log of net votes plus a time term — 10× the votes buys ~12.5 hours of freshness. Scores only change when votes arrive, so they can be updated incrementally.",
+      "Best (comments): lower bound of the Wilson score confidence interval — favours comments with a high upvote ratio and enough votes.",
+      "Store per-subreddit sorted sets (score → post ID) truncated to ~1,000 entries; deeper pages are rare."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "comments",
+   "title": "Deep dive: comment trees",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Store comments with `parent_id` and `post_id`; build the tree per post and cache it (sorted per sort mode).",
+      "Load the top N comments to depth D first; 'load more comments' fetches subtrees by parent.",
+      "Viral threads: recompute the cached tree incrementally on new comments/votes instead of rebuilding.",
+      "Alternatives: materialized path (`1/4/9/`) for subtree queries, or closure tables."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Fetching a 50k-comment thread with recursive SQL per request will melt the database. Cache the tree and page into it."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Vote queue lag",
+       "Scores stale",
+       "Partition more, autoscale workers, alert on lag; votes themselves are saved"
+      ],
+      [
+       "Hot thread",
+       "Cache key overloaded",
+       "Replicate key, local caches, CDN for logged-out"
+      ],
+      [
+       "Vote manipulation",
+       "Fake rankings",
+       "Rate limits, fuzzing displayed counts, anomaly detection"
+      ],
+      [
+       "Cache cold start",
+       "DB stampede",
+       "Request coalescing, warm caches on deploy"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Votes",
+       "Async via queue",
+       "Instant counts"
+      ],
+      [
+       "Listings",
+       "Precomputed, truncated",
+       "Arbitrary deep pagination"
+      ],
+      [
+       "Comments",
+       "Cached trees",
+       "Simple direct queries"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Subreddits, posts, comments, votes, sorts."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Read-heavy, eventual vote counts."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "50k votes/s, 500k views/s."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "Listing endpoints; votes keyed (user, thing)."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Vote queue → workers → cached sorted listings."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Hot/best formulas, comment trees, hot threads."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Queue lag, cache hit rate, manipulation."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you build the front page?",
+       "a": "Merge the cached hot lists of the user's subscribed subreddits (k-way merge by score), cache the result briefly."
+      },
+      {
+       "q": "Why partition the vote queue by thing ID?",
+       "a": "One worker owns each thing's updates, so counts change without lock contention and in order."
+      },
+      {
+       "q": "How do you stop double voting?",
+       "a": "Unique (user_id, thing_id) row; a vote is an upsert of direction; the count delta is new − old direction."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Votes: save the vote, queue the rescore.",
+      "Hot = log10(net votes) + time / 45000.",
+      "Best = Wilson lower bound.",
+      "Per-subreddit sorted listings in cache.",
+      "Cache comment trees, page into subtrees.",
+      "CDN for logged-out traffic."
+     ]
+    }
+   ]
+  }
+ ]
+}

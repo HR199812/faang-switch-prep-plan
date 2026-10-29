@@ -1,0 +1,331 @@
+{
+ "id": "whatsapp",
+ "num": 33,
+ "title": "WhatsApp",
+ "summary": "1:1 and group messaging for billions: persistent connections to chat servers, a per-user inbox for offline delivery, sent/delivered/read receipts, end-to-end encryption, and group fan-out.",
+ "tags": [
+  "WebSockets",
+  "Inbox",
+  "E2E encryption",
+  "Receipts"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "apis-realtime",
+  "queues-kafka",
+  "sharding",
+  "ops-security",
+  "ids"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "1:1 and group chats (up to ~1k members); text and media"
+      ],
+      [
+       "Functional",
+       "Offline delivery; sent ✓, delivered ✓✓, read (blue) receipts; last seen"
+      ],
+      [
+       "Functional",
+       "End-to-end encryption — servers can't read messages"
+      ],
+      [
+       "Non-functional",
+       "Delivery to online recipients < 500 ms; messages never lost; per-chat order"
+      ],
+      [
+       "Non-functional",
+       "~2B users, ~100B messages/day"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Messages",
+       "value": "~100B / day",
+       "sub": "~1.2M/s avg"
+      },
+      {
+       "label": "Concurrent connections",
+       "value": "~500M+"
+      },
+      {
+       "label": "Connections / server",
+       "value": "~1M+",
+       "sub": "Erlang, tuned kernel"
+      },
+      {
+       "label": "Server storage",
+       "value": "transient",
+       "sub": "deleted after delivery"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Unlike Slack, WhatsApp stores messages on the server only until they're delivered. History lives on devices (and user backups)."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Phone A",
+        "kind": "client"
+       },
+       {
+        "label": "Phone B",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Load balancer",
+        "kind": "edge",
+        "sub": "TCP/TLS"
+       }
+      ],
+      [
+       {
+        "label": "Chat servers",
+        "kind": "service",
+        "sub": "hold connections"
+       },
+       {
+        "label": "Session registry",
+        "kind": "cache",
+        "sub": "user → server"
+       }
+      ],
+      [
+       {
+        "label": "Message router",
+        "kind": "service"
+       },
+       {
+        "label": "Offline inbox",
+        "kind": "db",
+        "sub": "per-user queue"
+       }
+      ],
+      [
+       {
+        "label": "Media service",
+        "kind": "service",
+        "sub": "encrypted blobs"
+       },
+       {
+        "label": "Push (APNs/FCM)",
+        "kind": "ext"
+       }
+      ]
+     ],
+     "caption": "Connection-oriented chat"
+    }
+   ]
+  },
+  {
+   "id": "deep-delivery",
+   "title": "Deep dive: delivery and receipts",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Send",
+       "text": "A sends message (client-generated id) to its chat server; server persists to B's inbox and acks → single tick."
+      },
+      {
+       "title": "Route",
+       "text": "Look up B's chat server in the session registry; forward if online, else send a push notification."
+      },
+      {
+       "title": "Deliver",
+       "text": "B's device receives and acks → server deletes from inbox and sends a delivered receipt to A (double tick)."
+      },
+      {
+       "title": "Read",
+       "text": "When B opens the chat, B sends a read receipt — just another tiny message routed to A."
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Ordering per chat: sequence numbers assigned per conversation (or by the sender per chat) and reordered on device.",
+      "Dedup with the client message id — retries are safe."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "deep-e2e",
+   "title": "Deep dive: end-to-end encryption and groups",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Signal protocol: each device publishes identity and one-time prekeys; senders establish a session (X3DH) and ratchet keys per message (Double Ratchet).",
+      "Server only routes ciphertext; it can't read content.",
+      "Groups use **sender keys**: each member distributes a sender key to others once (pairwise-encrypted), then each message is encrypted once and fanned out by the server.",
+      "Multi-device: each device has its own keys; the sender encrypts for every device of every recipient."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The server is a store-and-forward router for ciphertext. Delivery state is server-side; message history is device-side."
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Shard inboxes by recipient user id; session registry is a sharded in-memory map with TTL heartbeats.",
+      "Media: client encrypts and uploads to blob storage; message carries the URL + key.",
+      "Chat server crash: clients reconnect to another server; undelivered messages are still in the inbox.",
+      "Large groups: fan-out on the server per member's inbox; cap group size."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Device-side history (WhatsApp)",
+       "pros": [
+        "Privacy; tiny server storage"
+       ],
+       "cons": [
+        "History sync to new devices is hard; backups needed"
+       ]
+      },
+      {
+       "title": "Server-side history (Slack)",
+       "pros": [
+        "Search, multi-device history"
+       ],
+       "cons": [
+        "Server can read data (no E2E), big storage"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "1:1, groups, receipts, offline, E2E?"
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Connections and message rate."
+      },
+      {
+       "min": "10–20",
+       "title": "HLD",
+       "text": "Chat servers, registry, inbox, push."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "Receipts flow; ordering/dedup; E2E + sender keys."
+      },
+      {
+       "min": "35–45",
+       "title": "Scale",
+       "text": "Sharding, reconnects, media."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How does 'last seen' work?",
+       "a": "Chat servers update a presence store on connect/disconnect/heartbeat; contacts fetch it on demand rather than subscribing."
+      },
+      {
+       "q": "How do you deliver to a phone that's been off for a week?",
+       "a": "The inbox keeps messages (with a retention limit, e.g. 30 days); on reconnect the device drains it."
+      },
+      {
+       "q": "Why Erlang?",
+       "a": "Lightweight processes per connection and robust supervision made millions of connections per box practical."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Persistent connections + session registry.",
+      "Per-user inbox until delivered; push if offline.",
+      "✓ = server ack, ✓✓ = device ack, blue = read receipt.",
+      "Client message ids for dedup; per-chat sequence for order.",
+      "Signal protocol; sender keys for groups."
+     ]
+    }
+   ]
+  }
+ ]
+}

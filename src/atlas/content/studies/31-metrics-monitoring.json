@@ -1,0 +1,338 @@
+{
+ "id": "metrics-monitoring",
+ "num": 31,
+ "title": "Metrics & Monitoring (Datadog)",
+ "summary": "Collect, store and alert on millions of time series: agents that pre-aggregate, a write-optimised time-series store with compression and downsampling, a query engine, and an alerting pipeline that must keep working during incidents.",
+ "tags": [
+  "Time series",
+  "Downsampling",
+  "Alerting",
+  "Cardinality"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "storage-engines",
+  "stream-processing",
+  "queues-kafka",
+  "ops-security",
+  "sharding"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Ingest metrics (name + tags + timestamp + value) from hosts and apps"
+      ],
+      [
+       "Functional",
+       "Query and graph over time ranges with aggregation (sum/avg/p99) by tag"
+      ],
+      [
+       "Functional",
+       "Alert rules evaluated continuously; notify on-call"
+      ],
+      [
+       "Non-functional",
+       "Ingest millions of points/s; recent data queryable within ~10 s"
+      ],
+      [
+       "Non-functional",
+       "Alerting must stay up when the systems it monitors are down"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Hosts",
+       "value": "~1M"
+      },
+      {
+       "label": "Series / host",
+       "value": "~500",
+       "sub": "≈500M active series"
+      },
+      {
+       "label": "Points",
+       "value": "~50M/s",
+       "sub": "10 s interval"
+      },
+      {
+       "label": "Bytes / point",
+       "value": "~1.4",
+       "sub": "after Gorilla compression"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "The killer is **cardinality** (number of unique series), not points. A tag like user_id multiplies series by millions."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Agents / SDKs",
+        "kind": "client",
+        "sub": "aggregate 10 s, batch"
+       }
+      ],
+      [
+       {
+        "label": "Ingest gateway",
+        "kind": "edge",
+        "sub": "auth, rate limit"
+       }
+      ],
+      [
+       {
+        "label": "Kafka",
+        "kind": "queue",
+        "sub": "partitioned by series id"
+       }
+      ],
+      [
+       {
+        "label": "TSDB writers",
+        "kind": "service",
+        "sub": "in-memory head block"
+       },
+       {
+        "label": "Alert evaluator",
+        "kind": "service",
+        "sub": "reads from stream"
+       }
+      ],
+      [
+       {
+        "label": "TSDB storage",
+        "kind": "db",
+        "sub": "compressed blocks"
+       },
+       {
+        "label": "Object store",
+        "kind": "store",
+        "sub": "older, downsampled"
+       }
+      ],
+      [
+       {
+        "label": "Query service",
+        "kind": "service",
+        "sub": "fan-out + merge"
+       },
+       {
+        "label": "Notification system",
+        "kind": "ext",
+        "sub": "PagerDuty, Slack"
+       }
+      ]
+     ],
+     "caption": "Ingest, store, query, alert"
+    }
+   ]
+  },
+  {
+   "id": "deep-storage",
+   "title": "Deep dive: time-series storage",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Identify a series by hashing metric name + sorted tags; an inverted index maps tag=value → series ids for queries.",
+      "Write path: append to an in-memory head block per series (plus WAL), flush 2-hour immutable blocks to disk — an LSM-like design.",
+      "**Gorilla compression:** delta-of-delta timestamps and XOR-encoded floats compress points to ~1–2 bytes.",
+      "**Downsampling / rollups:** keep raw for ~2 weeks, 1-minute rollups for months, 1-hour for years (store min/max/sum/count, not just avg)."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Points are cheap; series are expensive. I'd cap cardinality per customer and reject unbounded tags like request ids."
+    }
+   ]
+  },
+  {
+   "id": "deep-alerting",
+   "title": "Deep dive: alerting",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Evaluate",
+       "text": "Rules run every 10–60 s over a window (e.g. p99 latency > 500 ms for 5 min)."
+      },
+      {
+       "title": "Stateful",
+       "text": "Track pending → firing → resolved per rule and series to avoid flapping."
+      },
+      {
+       "title": "Route",
+       "text": "Group, dedupe and route to on-call with escalation; silence during maintenance."
+      },
+      {
+       "title": "Independence",
+       "text": "Run the alerting path on separate infrastructure; alert on missing data (dead man's switch)."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Evaluating alerts by querying the same storage cluster the dashboards hammer. During an incident everyone opens dashboards — alerts must not depend on that path."
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Shard by series id hash; queries fan out to shards and merge partial aggregates.",
+      "Push (agents send) vs pull (Prometheus scrapes): push scales across networks; pull makes target health obvious.",
+      "Backpressure: agents buffer locally and drop the oldest points first if the gateway is unavailable.",
+      "Percentiles can't be averaged across hosts — store histograms/sketches (e.g. DDSketch) and merge them."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Pull (Prometheus)",
+       "pros": [
+        "Server controls load",
+        "Easy to tell when a target is down"
+       ],
+       "cons": [
+        "Hard across NAT/firewalls; service discovery needed"
+       ]
+      },
+      {
+       "title": "Push (agents)",
+       "pros": [
+        "Works anywhere",
+        "Good for short-lived jobs"
+       ],
+       "cons": [
+        "Gateway must absorb bursts; harder to detect dead senders"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Scope",
+       "text": "Ingest, query, alert; retention."
+      },
+      {
+       "min": "5–10",
+       "title": "Estimate",
+       "text": "Series × interval; call out cardinality."
+      },
+      {
+       "min": "10–20",
+       "title": "HLD",
+       "text": "Agents → gateway → Kafka → TSDB; query; alerts."
+      },
+      {
+       "min": "20–35",
+       "title": "Deep dives",
+       "text": "Compression, blocks, rollups; alert state machine."
+      },
+      {
+       "min": "35–45",
+       "title": "Scale",
+       "text": "Sharding, histograms, backpressure, isolation."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "followups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you compute p99 across 1,000 hosts?",
+       "a": "Each host ships a mergeable histogram/sketch; merge sketches, then read the quantile. Averaging p99s is wrong."
+      },
+      {
+       "q": "How do you handle a customer suddenly sending 100× series?",
+       "a": "Per-tenant cardinality limits at ingest, with metrics about what was dropped."
+      },
+      {
+       "q": "Logs and traces?",
+       "a": "Different stores (inverted index for logs, trace store keyed by trace id) but share agents, ingest and tags."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Series = name + tags; cardinality is the cost driver.",
+      "Head block in memory + WAL → immutable compressed blocks.",
+      "Gorilla compression; rollups with min/max/sum/count.",
+      "Alerting isolated from dashboards; alert on absent data.",
+      "Merge sketches, never average percentiles."
+     ]
+    }
+   ]
+  }
+ ]
+}

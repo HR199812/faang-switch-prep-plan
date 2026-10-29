@@ -1,0 +1,242 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "inverted",
+   "title": "The inverted index",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Full-text search inverts the document → words relationship: for every term, store the list of documents (and positions) containing it — a **postings list**. A query for \"red shoes\" intersects the postings for `red` and `shoes`, then ranks the matches. Building that index is the job of an analysis pipeline that turns raw text into normalised terms."
+    },
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Tokenise",
+       "text": "\"Running Shoes!\" → [Running, Shoes]"
+      },
+      {
+       "title": "Normalise",
+       "text": "lowercase, strip accents → [running, shoes]"
+      },
+      {
+       "title": "Stem / lemmatise",
+       "text": "running → run, shoes → shoe"
+      },
+      {
+       "title": "Index",
+       "text": "run → [doc 3, doc 17 …], shoe → [doc 3, doc 9 …]"
+      }
+     ]
+    },
+    {
+     "t": "table",
+     "head": [
+      "Term",
+      "Postings (doc id : positions)"
+     ],
+     "rows": [
+      [
+       "run",
+       "3:[0], 17:[4, 12]"
+      ],
+      [
+       "shoe",
+       "3:[1], 9:[0]"
+      ],
+      [
+       "red",
+       "9:[2], 17:[1]"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ranking",
+   "title": "Relevance ranking",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**TF-IDF / BM25:** a term that appears often in this document but rarely across all documents is a strong signal. BM25 (the Lucene/Elasticsearch default) adds length normalisation and saturation.",
+      "**Field boosts:** a match in the title counts more than in the body.",
+      "**Business signals:** popularity, recency, rating, personalisation — often a second-stage learning-to-rank model over the top few hundred candidates.",
+      "**Two-stage retrieval:** cheap recall (BM25 / vector ANN) → expensive re-ranking on a small candidate set."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cluster",
+   "title": "How an Elasticsearch cluster serves a query",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Client",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Coordinating node",
+        "kind": "service",
+        "sub": "scatter / gather"
+       }
+      ],
+      [
+       {
+        "label": "Shard 0 (primary)",
+        "kind": "db"
+       },
+       {
+        "label": "Shard 1 (replica)",
+        "kind": "db"
+       },
+       {
+        "label": "Shard 2 (primary)",
+        "kind": "db"
+       }
+      ]
+     ],
+     "caption": "Indexes are sharded and replicated"
+    },
+    {
+     "t": "seq",
+     "actors": [
+      "Client",
+      "Coordinator",
+      "Shard 0",
+      "Shard 1",
+      "Shard 2"
+     ],
+     "steps": [
+      {
+       "from": "Client",
+       "to": "Coordinator",
+       "label": "search 'red shoes' size=10"
+      },
+      {
+       "from": "Coordinator",
+       "to": "Shard 0",
+       "label": "query phase: top 10 ids+scores"
+      },
+      {
+       "from": "Coordinator",
+       "to": "Shard 1",
+       "label": "query phase"
+      },
+      {
+       "from": "Coordinator",
+       "to": "Shard 2",
+       "label": "query phase"
+      },
+      {
+       "from": "Shard 1",
+       "to": "Coordinator",
+       "label": "candidates",
+       "dashed": true
+      },
+      {
+       "from": "Coordinator",
+       "to": "Coordinator",
+       "label": "merge to global top 10"
+      },
+      {
+       "from": "Coordinator",
+       "to": "Shard 2",
+       "label": "fetch phase: full docs for winners"
+      },
+      {
+       "from": "Coordinator",
+       "to": "Client",
+       "label": "results",
+       "dashed": true
+      }
+     ],
+     "caption": "Query then fetch"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Indexing is **near-real-time**: new documents become searchable after a refresh (~1 s by default).",
+      "Search is not the source of truth — feed it from the primary DB via CDC/events, and be able to rebuild it.",
+      "Deep pagination (page 1,000) is expensive; use search_after cursors."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "typeahead",
+   "title": "Typeahead / autocomplete",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Autocomplete must answer within ~50–100 ms as the user types, so it's served from precomputed structures rather than full search queries. The classic structure is a **trie** of popular queries where each node caches its top-k completions, so a lookup is just walking the prefix."
+    },
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Collect",
+       "text": "Log search queries (and selections) in a stream."
+      },
+      {
+       "title": "Aggregate",
+       "text": "Hourly/daily job counts queries with time decay and filters bad/offensive terms."
+      },
+      {
+       "title": "Build",
+       "text": "Construct a trie (or a prefix → top-k table) with top-k completions stored per node."
+      },
+      {
+       "title": "Serve",
+       "text": "Ship the structure to in-memory servers; cache the hottest prefixes at the edge / client."
+      },
+      {
+       "title": "Update",
+       "text": "Swap in a new version atomically; add a small real-time layer for trending queries."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Tip",
+     "text": "A simpler alternative that interviewers accept: store `prefix → [top 10 completions]` in Redis/KV for prefixes up to ~10 characters. It's just a big precomputed map."
+    }
+   ]
+  },
+  {
+   "id": "fuzzy",
+   "title": "Typos, synonyms and multilingual text",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Fuzzy matching via edit distance (Levenshtein automata) or n-gram indexes.",
+      "Synonym dictionaries (sneakers ↔ trainers) at query or index time.",
+      "Language-specific analysers; CJK languages need segmentation rather than whitespace tokenisation.",
+      "Spelling correction: \"did you mean\" from query logs."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "interview",
+   "title": "In an interview",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd index products into Elasticsearch via CDC from the primary database, rank with BM25 plus popularity boosts and a re-ranking model, and serve autocomplete from a precomputed prefix → top-k map that's rebuilt hourly from query logs."
+    }
+   ]
+  }
+ ]
+}

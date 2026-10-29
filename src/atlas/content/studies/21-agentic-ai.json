@@ -1,0 +1,494 @@
+{
+ "id": "agentic-ai",
+ "num": 21,
+ "title": "Agentic AI Systems",
+ "summary": "LLM agents that plan and act: a loop of reason → call tool → observe, with durable state, memory, sandboxed tools, budgets and human approval — built so long-running, multi-step work is reliable, observable and safe.",
+ "tags": [
+  "Agents",
+  "Tool use",
+  "Memory",
+  "Safety"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "queues-kafka",
+  "patterns",
+  "resilience",
+  "ops-security",
+  "rate-limiting"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Framing: design a platform that runs AI agents for users — e.g. a support agent that reads tickets, queries internal systems, issues refunds within limits, and escalates to humans."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Agents take a goal, plan steps, call tools (APIs, DB queries, code), and return results"
+      ],
+      [
+       "Functional",
+       "Long-running tasks (minutes to hours) that survive restarts; pause for human approval"
+      ],
+      [
+       "Functional",
+       "Short-term (conversation) and long-term memory (user facts, past cases)"
+      ],
+      [
+       "Functional",
+       "Multi-agent workflows (planner, researcher, executor, reviewer)"
+      ],
+      [
+       "Non-functional",
+       "Safety: no unauthorized actions; every action auditable"
+      ],
+      [
+       "Non-functional",
+       "Bounded cost and steps per task; observability of every step"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Tasks / day",
+       "value": "1M",
+       "sub": ""
+      },
+      {
+       "label": "Steps / task",
+       "value": "~5–20",
+       "sub": "LLM + tool calls"
+      },
+      {
+       "label": "LLM calls / s",
+       "value": "~150",
+       "sub": "avg, bursts higher"
+      },
+      {
+       "label": "Tokens / task",
+       "value": "~20–50k",
+       "sub": "context grows each step"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Each task is a multi-step loop, so cost and latency multiply by step count. The platform must checkpoint state between steps and cap steps, tokens and money per task."
+    }
+   ]
+  },
+  {
+   "id": "loop",
+   "title": "The agent loop",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "python",
+     "text": "state = {goal, messages, scratchpad, step: 0}\nwhile not done(state) and state.step < MAX_STEPS and budget_ok(state):\n    action = llm.decide(state, tools=allowed_tools(user))   # tool call or final answer\n    if action.final: break\n    if needs_approval(action): state = await human_approval(action)\n    result = sandbox.run(action.tool, action.args, timeout=30)\n    state.messages.append(observation(result))\n    checkpoint(state)          # durable after every step\n    state.step += 1"
+    },
+    {
+     "t": "list",
+     "items": [
+      "**ReAct:** interleave reasoning and tool calls. **Plan-and-execute:** plan first, execute steps, re-plan on failure.",
+      "**Reflection / critic:** a reviewer step checks output before acting or finishing.",
+      "Structured tool calling (JSON schema arguments) instead of parsing free text."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "User / API / events",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Agent API",
+        "kind": "edge",
+        "sub": "auth, quotas"
+       },
+       {
+        "label": "Task queue",
+        "kind": "queue"
+       }
+      ],
+      [
+       {
+        "label": "Agent orchestrator",
+        "kind": "service",
+        "sub": "durable workflow"
+       },
+       {
+        "label": "LLM gateway",
+        "kind": "service",
+        "sub": "routing, caching, limits"
+       }
+      ],
+      [
+       {
+        "label": "Tool registry + policy",
+        "kind": "service",
+        "sub": "allowlist, scopes"
+       },
+       {
+        "label": "Sandboxed executors",
+        "kind": "service",
+        "sub": "code, browser, APIs"
+       }
+      ],
+      [
+       {
+        "label": "State store",
+        "kind": "db",
+        "sub": "checkpoints"
+       },
+       {
+        "label": "Memory",
+        "kind": "store",
+        "sub": "vector + KV"
+       },
+       {
+        "label": "Trace store",
+        "kind": "db",
+        "sub": "every step"
+       }
+      ]
+     ],
+     "caption": "Durable orchestrator drives the loop; tools run in a sandbox behind a policy gate"
+    }
+   ]
+  },
+  {
+   "id": "state",
+   "title": "Deep dive: durable execution and state",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Run agents on a durable workflow engine (Temporal, Step Functions, LangGraph with a Postgres checkpointer): each step is persisted so a crash resumes mid-task.",
+      "Tool calls carry idempotency keys so retries after a crash don't refund twice.",
+      "Long waits (human approval, webhook) suspend the workflow without holding a worker.",
+      "Context management: summarize or trim old steps; keep tool outputs as references (IDs/URLs) rather than pasting huge payloads into the prompt."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "memory",
+   "title": "Deep dive: memory",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Memory",
+      "What",
+      "Store"
+     ],
+     "rows": [
+      [
+       "Working / short-term",
+       "Current conversation and scratchpad",
+       "In the checkpointed state"
+      ],
+      [
+       "Episodic",
+       "Past tasks and outcomes",
+       "Vector store + metadata, retrieved by similarity"
+      ],
+      [
+       "Semantic / profile",
+       "Stable facts about the user or org",
+       "KV / document store, explicit writes"
+      ],
+      [
+       "Procedural",
+       "Learned playbooks, prompts",
+       "Versioned prompt/config store"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Memory writes are a security surface: an injected instruction saved to memory can poison future tasks. Validate and scope what gets stored."
+    }
+   ]
+  },
+  {
+   "id": "tools",
+   "title": "Deep dive: tools, permissions and sandboxing",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Tool registry with JSON schemas, descriptions, owner, scopes and risk level.",
+      "Agents act with the **user's** delegated permissions (OAuth scopes), never a super-user service account.",
+      "High-risk actions (payments, deletes, sending emails) require human approval or hard limits (refund ≤ ₹2,000).",
+      "Code execution and browsing in isolated sandboxes (gVisor/Firecracker containers), no network by default, CPU/time limits.",
+      "Treat all tool output as untrusted data: it may contain prompt injection; never let it change permissions."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The model proposes actions; a deterministic policy layer decides whether they run. Permissions, limits and approvals live outside the model."
+    }
+   ]
+  },
+  {
+   "id": "multi-agent",
+   "title": "Deep dive: multi-agent patterns",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Pattern",
+      "How",
+      "When"
+     ],
+     "rows": [
+      [
+       "Single agent + tools",
+       "One loop, many tools",
+       "Default; simplest to debug"
+      ],
+      [
+       "Supervisor / router",
+       "A coordinator delegates to specialist agents",
+       "Distinct domains"
+      ],
+      [
+       "Planner–executor",
+       "Planner writes steps, executors do them",
+       "Long tasks"
+      ],
+      [
+       "Debate / reviewer",
+       "Second agent critiques",
+       "Quality-critical output"
+      ],
+      [
+       "Swarm / handoff",
+       "Agents hand control to each other",
+       "Conversational routing"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "More agents mean more tokens and more failure points; add them only when one agent with good tools can't do the job."
+    }
+   ]
+  },
+  {
+   "id": "observability",
+   "title": "Deep dive: evaluation and observability",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Trace every run: prompts, tool calls, arguments, outputs, latency, tokens, cost (LangSmith, Langfuse, OpenTelemetry GenAI conventions).",
+      "Offline evals on datasets of tasks: success rate, steps taken, cost, policy violations; regression tests before shipping prompt/model changes.",
+      "Online: sample traces for LLM-as-judge scoring, user feedback, escalation rate.",
+      "Guard metrics: loops detected, budget exhaustion, approval rejections."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Infinite loop / thrashing",
+       "Cost blow-up",
+       "Max steps, token and money budgets, loop detection"
+      ],
+      [
+       "Hallucinated tool args",
+       "Wrong actions",
+       "Schema validation, dry-run, confirmation for risky tools"
+      ],
+      [
+       "Prompt injection via tool output",
+       "Data exfiltration",
+       "Least privilege, output isolation, egress allowlists"
+      ],
+      [
+       "Worker crash mid-task",
+       "Lost progress / duplicate actions",
+       "Checkpoints + idempotent tools"
+      ],
+      [
+       "LLM outage",
+       "Tasks stall",
+       "Fallback models, queue with retries, pause and resume"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Autonomy",
+       "Bounded autonomy + approvals",
+       "Fully hands-off automation"
+      ],
+      [
+       "Architecture",
+       "Single agent first",
+       "Elaborate multi-agent setups"
+      ],
+      [
+       "Execution",
+       "Durable workflow",
+       "Simple in-process loop"
+      ],
+      [
+       "Permissions",
+       "User-delegated scopes",
+       "Convenience of broad service accounts"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Goal → tools → result; long-running; approvals."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Safety, audit, cost caps."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "Steps × tokens × tasks."
+      },
+      {
+       "min": "12–17",
+       "title": "Loop",
+       "text": "ReAct loop with checkpoints."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Queue → orchestrator → LLM gateway + tool sandbox; state, memory, traces."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Durable state, tool permissions, memory, evals."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Budgets, injection defenses, success-rate metrics."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you stop an agent from running forever?",
+       "a": "Step, token, wall-clock and money budgets enforced by the orchestrator, plus repetition detection; on exhaustion, summarize and escalate."
+      },
+      {
+       "q": "How do you test an agent?",
+       "a": "Scenario datasets with mocked tools, assert outcomes and forbidden actions; replay production traces; track success rate per release."
+      },
+      {
+       "q": "Where does MCP fit?",
+       "a": "As the standard interface for exposing tools and data to agents — see the next case study."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Loop: decide → act → observe → checkpoint.",
+      "Durable execution + idempotent tools.",
+      "Policy layer outside the model; user-scoped permissions.",
+      "Sandbox code/browse tools; treat tool output as untrusted.",
+      "Budgets on steps, tokens, money.",
+      "Trace and evaluate every run."
+     ]
+    }
+   ]
+  }
+ ]
+}

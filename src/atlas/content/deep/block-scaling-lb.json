@@ -1,0 +1,242 @@
+{
+ "minutes": 13,
+ "sections": [
+  {
+   "id": "vertical-horizontal",
+   "title": "Vertical vs horizontal scaling",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "**Vertical scaling** means buying a bigger machine — more CPU, RAM, faster disks. It's the simplest option and goes surprisingly far (a single server with 100+ cores and terabytes of RAM exists), but it has a ceiling, gets disproportionately expensive near the top, and leaves you with a single point of failure."
+    },
+    {
+     "t": "p",
+     "text": "**Horizontal scaling** means adding more machines and spreading work across them. It's how internet-scale systems grow, but it only works cleanly for **stateless** components. The design move that makes it possible is pushing state out of the app tier into databases, caches and object stores."
+    },
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Vertical",
+       "pros": [
+        "No code changes",
+        "No distributed-systems complexity"
+       ],
+       "cons": [
+        "Hard ceiling",
+        "Single point of failure",
+        "Downtime to resize"
+       ]
+      },
+      {
+       "title": "Horizontal",
+       "pros": [
+        "Near-linear capacity growth",
+        "Redundancy for free"
+       ],
+       "cons": [
+        "Requires statelessness or partitioning",
+        "Load balancing, coordination"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "stateless",
+   "title": "Making a tier stateless",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Sessions in a shared store (Redis) or a signed token (JWT) instead of server memory.",
+      "Uploaded files to object storage, not the local disk.",
+      "Caches either shared (Redis) or treated as disposable per-instance.",
+      "Any instance can serve any request → instances can be added, removed or replaced at will."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Once the app tier is stateless, scaling it is an autoscaling-group problem. The hard scaling problems move to the stateful tiers: the database, caches and queues."
+    }
+   ]
+  },
+  {
+   "id": "lb",
+   "title": "What a load balancer actually does",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Clients",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "DNS / GeoDNS",
+        "kind": "edge",
+        "sub": "pick a region"
+       }
+      ],
+      [
+       {
+        "label": "L4/L7 load balancer",
+        "kind": "edge",
+        "sub": "health checks, TLS"
+       }
+      ],
+      [
+       {
+        "label": "App instance 1",
+        "kind": "service"
+       },
+       {
+        "label": "App instance 2",
+        "kind": "service"
+       },
+       {
+        "label": "App instance 3",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Shared state",
+        "kind": "db",
+        "sub": "DB, cache, blobs"
+       }
+      ]
+     ],
+     "caption": "A typical request path"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Distributes requests across healthy instances and removes unhealthy ones via **health checks** (active probes and passive error tracking).",
+      "Terminates TLS so backends don't have to.",
+      "Connection draining: on deploy, stop sending new requests to an instance but let in-flight ones finish.",
+      "Is itself redundant (active–active pairs, or a managed cloud LB)."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "algorithms",
+   "title": "Load-balancing algorithms",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Algorithm",
+      "How it chooses",
+      "Best for"
+     ],
+     "rows": [
+      [
+       "Round robin",
+       "Next instance in turn",
+       "Uniform, short requests"
+      ],
+      [
+       "Weighted round robin",
+       "Proportional to instance weight",
+       "Mixed instance sizes, canaries"
+      ],
+      [
+       "Least connections",
+       "Fewest active connections",
+       "Variable request durations, WebSockets"
+      ],
+      [
+       "Least response time / EWMA",
+       "Fastest recent responses",
+       "Heterogeneous latency"
+      ],
+      [
+       "Power of two choices",
+       "Pick 2 at random, choose the less loaded",
+       "Large fleets — near-optimal, cheap"
+      ],
+      [
+       "Consistent hashing",
+       "Hash of a key (user id) → instance",
+       "Cache affinity, sticky routing"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Tip",
+     "text": "\"Power of two random choices\" is a great interview detail: it avoids the herd behaviour of always picking the global minimum, needs no global state, and gets exponentially better load balance than pure random."
+    }
+   ]
+  },
+  {
+   "id": "sticky",
+   "title": "Sticky sessions — and why to avoid them",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Sticky sessions pin a user to one backend (via a cookie or IP hash) so in-memory session state works. They break even load distribution, lose sessions when the instance dies, and complicate deploys. Prefer stateless instances; use stickiness only for genuinely stateful connections (WebSocket gateways), and even then design for reconnection to another node."
+    }
+   ]
+  },
+  {
+   "id": "autoscaling",
+   "title": "Autoscaling",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Scale on a metric that tracks load: CPU, requests per instance, queue depth, or p95 latency.",
+      "Scale out fast, scale in slowly (cooldowns) to avoid flapping.",
+      "Pre-warm or schedule capacity for known spikes — autoscaling reacts in minutes, a flash crowd arrives in seconds.",
+      "Keep startup fast (small images, lazy initialisation) so new instances help quickly."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "global",
+   "title": "Multi-region scaling",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Active–passive",
+       "pros": [
+        "Simple consistency: one writable region"
+       ],
+       "cons": [
+        "Failover takes minutes; standby capacity is idle"
+       ]
+      },
+      {
+       "title": "Active–active",
+       "pros": [
+        "Low latency everywhere; survives region loss"
+       ],
+       "cons": [
+        "Data conflicts across regions; harder consistency"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd scale the stateless tier horizontally behind an L7 load balancer with health checks and least-request routing, and keep state in a replicated database and shared cache."
+    }
+   ]
+  }
+ ]
+}

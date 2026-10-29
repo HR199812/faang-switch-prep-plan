@@ -1,0 +1,243 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Search by meaning",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Keyword search matches words; vector search matches meaning. An embedding model turns a query (\"cheap flights to the beach\") and every document into vectors of a few hundred to a few thousand numbers, positioned so that semantically similar things are close together. Search becomes: find the stored vectors nearest to the query vector. This powers semantic search, recommendations (\"items like this\"), deduplication, and retrieval-augmented generation (RAG)."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Similarity",
+      "Formula",
+      "Notes"
+     ],
+     "rows": [
+      [
+       "Cosine",
+       "a·b / (|a||b|)",
+       "Ignores magnitude; most text embeddings"
+      ],
+      [
+       "Dot product",
+       "a·b",
+       "Equals cosine when vectors are normalised; fastest"
+      ],
+      [
+       "Euclidean (L2)",
+       "|a − b|",
+       "Common for image embeddings"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pipeline",
+   "title": "Indexing and query pipeline",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Documents",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Chunker",
+        "kind": "service",
+        "sub": "~200–800 tokens, overlap"
+       },
+       {
+        "label": "Embedding model",
+        "kind": "ext"
+       }
+      ],
+      [
+       {
+        "label": "Vector index",
+        "kind": "db",
+        "sub": "HNSW / IVF-PQ + metadata"
+       },
+       {
+        "label": "Keyword index",
+        "kind": "db",
+        "sub": "BM25"
+       }
+      ],
+      [
+       {
+        "label": "Retriever",
+        "kind": "service",
+        "sub": "hybrid + filters"
+       },
+       {
+        "label": "Re-ranker",
+        "kind": "service",
+        "sub": "cross-encoder"
+       }
+      ],
+      [
+       {
+        "label": "LLM / application",
+        "kind": "service"
+       }
+      ]
+     ],
+     "caption": "RAG-style retrieval"
+    },
+    {
+     "t": "seq",
+     "actors": [
+      "User",
+      "Retriever",
+      "Vector index",
+      "Keyword index",
+      "Re-ranker"
+     ],
+     "steps": [
+      {
+       "from": "User",
+       "to": "Retriever",
+       "label": "\"how do refunds work?\""
+      },
+      {
+       "from": "Retriever",
+       "to": "Retriever",
+       "label": "embed query (≈20 ms)"
+      },
+      {
+       "from": "Retriever",
+       "to": "Vector index",
+       "label": "top 50 ANN, filter tenant=acme"
+      },
+      {
+       "from": "Retriever",
+       "to": "Keyword index",
+       "label": "top 50 BM25"
+      },
+      {
+       "from": "Retriever",
+       "to": "Retriever",
+       "label": "reciprocal rank fusion"
+      },
+      {
+       "from": "Retriever",
+       "to": "Re-ranker",
+       "label": "score top 50 → keep 8"
+      },
+      {
+       "from": "Re-ranker",
+       "to": "User",
+       "label": "8 passages (to the LLM prompt)",
+       "dashed": true
+      }
+     ],
+     "caption": "Answering a query"
+    }
+   ]
+  },
+  {
+   "id": "ann",
+   "title": "Approximate nearest-neighbour indexes",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Comparing the query with every vector (brute force) is exact but O(n·d): fine for a million vectors on a GPU, too slow for a billion. ANN indexes trade a little recall for orders-of-magnitude speed."
+    },
+    {
+     "t": "list",
+     "items": [
+      "**HNSW (Hierarchical Navigable Small World):** a multi-layer proximity graph. Search starts at a sparse top layer, greedily walks toward the query, and drops to denser layers. Excellent recall/latency; memory-hungry (vectors plus graph links in RAM); supports incremental inserts. Tune M (links per node) and efSearch (breadth of search).",
+      "**IVF (inverted file):** k-means clusters the vectors; a query searches only the nprobe nearest clusters. Tune nprobe for recall vs speed.",
+      "**PQ (product quantisation):** compresses each vector into a few bytes by quantising sub-vectors — 10–50× smaller, enabling billions of vectors per node at some recall cost. Often combined as IVF-PQ.",
+      "**DiskANN / SPANN:** graph or cluster indexes designed to keep most data on SSD."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "filters",
+   "title": "Metadata filters and multi-tenancy",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Real queries add constraints: tenant, language, date, permissions.",
+      "**Post-filtering** (ANN first, filter after) can return too few results when the filter is selective.",
+      "**Pre-filtering / filtered HNSW** applies the filter during traversal; or partition the index per tenant when tenants are large.",
+      "Enforce document-level permissions at retrieval time, using ACL metadata stored with each chunk."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Retrieving across all tenants and relying on the LLM prompt to \"ignore documents the user can't see\". Permissions must be enforced before retrieval results leave the store."
+    }
+   ]
+  },
+  {
+   "id": "quality",
+   "title": "Measuring and improving quality",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Lever",
+      "Effect"
+     ],
+     "rows": [
+      [
+       "Chunk size and overlap",
+       "Too large dilutes meaning; too small loses context"
+      ],
+      [
+       "Hybrid BM25 + vectors",
+       "Catches exact terms (IDs, error codes, names) embeddings blur"
+      ],
+      [
+       "Cross-encoder re-ranking",
+       "Big precision gains on the final few results"
+      ],
+      [
+       "Better / domain-tuned embeddings",
+       "Improves recall at the source"
+      ],
+      [
+       "Recall@k vs brute force",
+       "Measures what the ANN index loses"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ops",
+   "title": "Operating it",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Store the embedding model version with each vector; a model change means re-embedding everything — run old and new indexes side by side and switch.",
+      "Shard by tenant or hash; replicate for query throughput; HNSW memory ≈ n × (4·d bytes + ~100–200 bytes of links).",
+      "Options range from libraries (FAISS, hnswlib) to extensions (pgvector) to search engines (OpenSearch, Elasticsearch) and dedicated databases (Pinecone, Weaviate, Milvus, Qdrant)."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd chunk and embed documents, store them in an HNSW index with tenant and ACL metadata, run hybrid retrieval with BM25, fuse and re-rank the top 50 with a cross-encoder, and pass the best 8 chunks to the model."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,467 @@
+{
+ "id": "ai-systems",
+ "num": 20,
+ "title": "AI Systems",
+ "summary": "A production ML/LLM platform end to end: data and feature pipelines, training and evaluation, a model registry, online inference with caching and routing, guardrails, and monitoring for drift, quality and cost.",
+ "tags": [
+  "ML platform",
+  "Inference",
+  "Evaluation",
+  "Guardrails"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "queues-kafka",
+  "caching",
+  "search",
+  "ops-security",
+  "rate-limiting"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Framing: design the AI platform a company uses to ship features like recommendations, fraud scoring, semantic search and an LLM-powered assistant."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Ingest data, compute features, train and evaluate models, register versions"
+      ],
+      [
+       "Functional",
+       "Serve predictions online (ms) and in batch; serve LLM completions and embeddings"
+      ],
+      [
+       "Functional",
+       "A/B test and roll back models; human feedback capture"
+      ],
+      [
+       "Non-functional",
+       "Online p99: < 50 ms for classic models; first token < 1 s for LLMs"
+      ],
+      [
+       "Non-functional",
+       "Reproducibility (data + code + config versioned); training/serving consistency"
+      ],
+      [
+       "Non-functional",
+       "Cost control per request; safety and privacy (PII) controls"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Online predictions",
+       "value": "~50k/s",
+       "sub": "fraud + recs"
+      },
+      {
+       "label": "LLM requests",
+       "value": "~2k/s",
+       "sub": "~1k tokens each"
+      },
+      {
+       "label": "Feature store reads",
+       "value": "~500k/s",
+       "sub": "10 features × 50k"
+      },
+      {
+       "label": "Embeddings stored",
+       "value": "~1B",
+       "sub": "768-d ≈ 3 KB each → 3 TB"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Classic models are cheap per call but need low-latency feature lookups; LLM calls are expensive, so routing, caching and token budgets matter more than raw QPS."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Event streams + OLTP",
+        "kind": "db"
+       },
+       {
+        "label": "Data lake / warehouse",
+        "kind": "store"
+       }
+      ],
+      [
+       {
+        "label": "Feature pipelines",
+        "kind": "service",
+        "sub": "batch + streaming"
+       },
+       {
+        "label": "Feature store",
+        "kind": "cache",
+        "sub": "online + offline"
+       }
+      ],
+      [
+       {
+        "label": "Training + eval",
+        "kind": "service",
+        "sub": "GPU jobs"
+       },
+       {
+        "label": "Model registry",
+        "kind": "db",
+        "sub": "versions, metrics, lineage"
+       }
+      ],
+      [
+       {
+        "label": "Inference gateway",
+        "kind": "edge",
+        "sub": "routing, auth, quotas"
+       },
+       {
+        "label": "Model servers",
+        "kind": "service",
+        "sub": "Triton / vLLM"
+       }
+      ],
+      [
+       {
+        "label": "Guardrails",
+        "kind": "service",
+        "sub": "PII, safety"
+       },
+       {
+        "label": "Monitoring",
+        "kind": "service",
+        "sub": "drift, quality, cost"
+       }
+      ]
+     ],
+     "caption": "Offline loop builds models; online loop serves them; monitoring closes the loop"
+    }
+   ]
+  },
+  {
+   "id": "features",
+   "title": "Deep dive: features and training/serving skew",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Feature store (Feast, Tecton, SageMaker FS): one definition → offline store (warehouse, for training) and online store (Redis/DynamoDB, for serving).",
+      "Point-in-time correct joins for training so no future data leaks into labels.",
+      "Streaming features (counts in last 5 min) computed in Flink and written to the online store.",
+      "Skew: log the exact features used at serving time and train on those logs."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Training/serving skew is the most common silent ML bug: the model sees differently computed features in production than in training."
+    }
+   ]
+  },
+  {
+   "id": "training",
+   "title": "Deep dive: training, evaluation, registry",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Pipelines (Kubeflow, Airflow, SageMaker Pipelines): data validation → training → evaluation → registration.",
+      "Experiment tracking (MLflow / W&B): params, metrics, artifacts, data version.",
+      "Evaluation gates: offline metrics vs current champion, fairness/bias slices, latency budget; for LLMs, eval datasets scored by rules, reference answers, and LLM-as-judge.",
+      "Registry stages: staging → canary → production with lineage back to data and code.",
+      "Distributed training for large models: data parallel, tensor/pipeline parallel, checkpointing."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "serving",
+   "title": "Deep dive: online inference",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Pattern",
+      "Use"
+     ],
+     "rows": [
+      [
+       "Real-time REST/gRPC",
+       "Fraud score at checkout, ranking"
+      ],
+      [
+       "Batch scoring",
+       "Nightly churn scores written to a table"
+      ],
+      [
+       "Streaming inference",
+       "Score events from Kafka"
+      ],
+      [
+       "LLM serving (vLLM, TGI, Triton)",
+       "Continuous batching, KV cache, streaming tokens"
+      ],
+      [
+       "Embedding service",
+       "Batch requests, cache by content hash"
+      ]
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Model router: choose model by task, cost and latency (small model first, escalate to large); fallback on errors.",
+      "Semantic cache: embed the prompt, return a cached answer for near-duplicate questions (with care for personalization).",
+      "Exact cache for embeddings and deterministic calls.",
+      "Shadow deploy and canary: route 1% to a new model, compare metrics, then promote."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "guardrails",
+   "title": "Deep dive: guardrails and safety",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Input: PII detection/redaction, prompt-injection detection, policy classifiers, max token limits.",
+      "Output: toxicity and policy filters, schema validation for structured output, grounding checks (citations must come from retrieved docs).",
+      "Rate limits and per-tenant token budgets; audit logs of prompts/responses with retention rules.",
+      "Human-in-the-loop for high-risk decisions (credit, medical)."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "monitoring",
+   "title": "Deep dive: monitoring",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Signal",
+      "Example"
+     ],
+     "rows": [
+      [
+       "Data drift",
+       "Feature distribution shift (PSI, KL divergence)"
+      ],
+      [
+       "Prediction drift",
+       "Score distribution changes"
+      ],
+      [
+       "Quality",
+       "Delayed labels: precision/recall; for LLMs: thumbs up/down, eval sampling, hallucination rate"
+      ],
+      [
+       "System",
+       "Latency p99, GPU utilization, queue wait, error rate"
+      ],
+      [
+       "Cost",
+       "Tokens and GPU-seconds per request, per tenant"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Model regression after deploy",
+       "Bad decisions",
+       "Eval gates, canary, auto-rollback on metric drop"
+      ],
+      [
+       "Feature store outage",
+       "Predictions fail",
+       "Default features / fallback model, cached features"
+      ],
+      [
+       "LLM provider outage or rate limit",
+       "Assistant down",
+       "Multi-provider routing, queue, degrade gracefully"
+      ],
+      [
+       "Prompt injection",
+       "Data leak / bad actions",
+       "Isolation of tools, allowlists, output checks"
+      ],
+      [
+       "GPU shortage",
+       "Latency spikes",
+       "Admission control, smaller models, batch non-urgent work"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Features",
+       "Feature store",
+       "Simplicity of ad-hoc SQL features"
+      ],
+      [
+       "LLM",
+       "Router + small-first",
+       "Max quality on every call"
+      ],
+      [
+       "Caching",
+       "Semantic cache for FAQs",
+       "Perfect freshness / personalization"
+      ],
+      [
+       "Rollout",
+       "Shadow + canary",
+       "Speed of shipping"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Which AI features; online vs batch; LLM use."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Latency, reproducibility, cost, safety."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "Prediction QPS, feature reads, token volume."
+      },
+      {
+       "min": "12–17",
+       "title": "Pipelines",
+       "text": "Data → features → train → eval → registry."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Offline loop + online gateway + model servers."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Skew, serving patterns, guardrails, monitoring."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Rollout safety, drift alerts, cost per request."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you A/B test models?",
+       "a": "Assign users to buckets via the gateway, log model version with every prediction, compare business metrics with significance tests."
+      },
+      {
+       "q": "Fine-tune or RAG?",
+       "a": "RAG for fresh, citable knowledge; fine-tune for style, format or narrow skills; often both."
+      },
+      {
+       "q": "How do you cut LLM cost?",
+       "a": "Smaller models for easy queries, caching, prompt compression, batching, limit max tokens, distillation."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Feature store: one definition, offline + online.",
+      "Point-in-time joins; log serving features.",
+      "Registry + eval gates + canary.",
+      "Router: small model first, escalate.",
+      "Guardrails on input and output.",
+      "Monitor drift, quality, latency, cost."
+     ]
+    }
+   ]
+  }
+ ]
+}

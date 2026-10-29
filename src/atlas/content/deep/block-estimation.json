@@ -1,0 +1,264 @@
+{
+ "minutes": 12,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Why interviewers ask you to estimate",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Back-of-envelope estimation isn't about getting the exact number. It's about letting numbers drive design decisions: does the data fit on one machine? Do we need a cache? Is this read-heavy or write-heavy? Will one database handle the write rate? A two-minute estimate that says \"~200 GB, fits in memory on a few nodes\" can eliminate half the architecture you'd otherwise draw."
+    },
+    {
+     "t": "p",
+     "text": "Interviewers want to see a **repeatable method**, sensible rounding, and — most importantly — what you conclude from the numbers. An estimate that doesn't change any decision is wasted time."
+    }
+   ]
+  },
+  {
+   "id": "method",
+   "title": "The method, step by step",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Users → actions",
+       "text": "Start from DAU and actions per user per day: 100M DAU × 10 posts viewed = 1B reads/day."
+      },
+      {
+       "title": "Per day → per second",
+       "text": "Divide by ~100k (86,400 s rounds to 10⁵): 1B/day ≈ 10k/s average."
+      },
+      {
+       "title": "Average → peak",
+       "text": "Multiply by 2–5× for daily peaks, more for events (on-sales, New Year)."
+      },
+      {
+       "title": "Storage",
+       "text": "Writes/day × object size × retention × replication factor."
+      },
+      {
+       "title": "Bandwidth",
+       "text": "QPS × response size, separately for ingress and egress."
+      },
+      {
+       "title": "Conclude",
+       "text": "Compare against per-machine capacity and state the design consequence."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Memorise one conversion: **1M per day ≈ 12 per second.** Everything else is multiplication."
+    }
+   ]
+  },
+  {
+   "id": "worked",
+   "title": "A worked example: a photo-sharing app",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Quantity",
+      "Assumption",
+      "Result"
+     ],
+     "rows": [
+      [
+       "DAU",
+       "50M",
+       ""
+      ],
+      [
+       "Uploads",
+       "2 photos / user / day",
+       "100M/day ≈ 1.2k/s avg, ~5k/s peak"
+      ],
+      [
+       "Photo size",
+       "~2 MB original + thumbnails ~0.5 MB",
+       "~2.5 MB per upload"
+      ],
+      [
+       "Storage / day",
+       "100M × 2.5 MB",
+       "250 TB/day ≈ 90 PB/year (before replication)"
+      ],
+      [
+       "Feed reads",
+       "50 photos viewed / user / day",
+       "2.5B/day ≈ 30k/s avg"
+      ],
+      [
+       "Egress",
+       "30k/s × ~200 KB (feed-sized image)",
+       "≈ 6 GB/s → must be served from a CDN"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "At ~6 GB/s of image egress the origin can't serve this; images go to object storage behind a CDN, and the app servers only serve metadata."
+    }
+   ]
+  },
+  {
+   "id": "capacity",
+   "title": "Per-component capacity to compare against",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Component",
+      "Rough capacity per node",
+      "Implication"
+     ],
+     "rows": [
+      [
+       "App server (stateless HTTP)",
+       "1k–10k req/s",
+       "Scale horizontally behind an LB"
+      ],
+      [
+       "Postgres / MySQL",
+       "~10k simple writes/s; 50k+ reads/s with indexes",
+       "Beyond that: replicas for reads, sharding for writes"
+      ],
+      [
+       "Redis",
+       "~100k+ ops/s per core",
+       "One cluster handles most caching needs"
+      ],
+      [
+       "Kafka broker",
+       "~100s of MB/s",
+       "Partitions spread throughput"
+      ],
+      [
+       "SSD",
+       "~1 GB/s sequential, ~100k IOPS",
+       ""
+      ],
+      [
+       "Network (10 Gbps NIC)",
+       "~1 GB/s",
+       "Large media needs many nodes or a CDN"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "latency",
+   "title": "Latency numbers that change designs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Operation",
+      "Time",
+      "So what"
+     ],
+     "rows": [
+      [
+       "L1 cache / RAM reference",
+       "~1 ns / ~100 ns",
+       "In-memory indexes are effectively free"
+      ],
+      [
+       "SSD random read",
+       "~100 µs",
+       "1,000× slower than RAM — cache hot data"
+      ],
+      [
+       "Same-datacenter round trip",
+       "~0.5 ms",
+       "A dozen sequential service calls add up"
+      ],
+      [
+       "Cross-region round trip",
+       "~50–150 ms",
+       "Synchronous cross-region writes are expensive"
+      ],
+      [
+       "Read 1 MB from SSD / network",
+       "~1 ms / ~10 ms",
+       "Batch and stream large payloads"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "availability",
+   "title": "Availability arithmetic",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Availability",
+      "Downtime / year",
+      "Downtime / month"
+     ],
+     "rows": [
+      [
+       "99%",
+       "3.65 days",
+       "7.3 hours"
+      ],
+      [
+       "99.9%",
+       "8.8 hours",
+       "44 minutes"
+      ],
+      [
+       "99.99%",
+       "53 minutes",
+       "4.4 minutes"
+      ],
+      [
+       "99.999%",
+       "5.3 minutes",
+       "26 seconds"
+      ]
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Components in **series** multiply: three 99.9% services in a chain ≈ 99.7%.",
+      "**Redundant** components in parallel: 1 − (1 − a)². Two independent 99% replicas ≈ 99.99%.",
+      "This is why every synchronous dependency you add lowers your ceiling."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pitfalls",
+   "title": "Common mistakes",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Spending five minutes on precise arithmetic. Round aggressively (86,400 → 100k, 2.5 → 3) and say you're rounding."
+    },
+    {
+     "t": "list",
+     "items": [
+      "Forgetting peak vs average — systems are sized for peak.",
+      "Forgetting replication (×3) and indexes (+30–50%) in storage.",
+      "Not converting units carefully (bits vs bytes on network links).",
+      "Estimating and then not using the result."
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,378 @@
+{
+ "studies": [
+  {
+   "num": 1,
+   "id": "url-shortener",
+   "title": "URL Shortener",
+   "date": "2026-10-28",
+   "focus": [
+    "IDs",
+    "Caching",
+    "KV store"
+   ]
+  },
+  {
+   "num": 2,
+   "id": "redis-use-cases",
+   "title": "Redis Use Cases",
+   "date": "2026-10-31",
+   "focus": [
+    "Data structures",
+    "Locks",
+    "Rate limits"
+   ]
+  },
+  {
+   "num": 3,
+   "id": "slack",
+   "title": "Slack",
+   "date": "2026-11-03",
+   "focus": [
+    "WebSockets",
+    "Fan-out",
+    "Sharding"
+   ]
+  },
+  {
+   "num": 4,
+   "id": "twitter-timeline",
+   "title": "Twitter Timeline",
+   "date": "2026-11-06",
+   "focus": [
+    "Fan-out",
+    "Cache",
+    "Ranking"
+   ]
+  },
+  {
+   "num": 5,
+   "id": "uber",
+   "title": "Uber",
+   "date": "2026-11-09",
+   "focus": [
+    "Geospatial",
+    "Matching",
+    "Realtime"
+   ]
+  },
+  {
+   "num": 6,
+   "id": "apache-kafka",
+   "title": "Apache Kafka",
+   "date": "2026-11-12",
+   "focus": [
+    "Logs",
+    "Replication",
+    "Consumers"
+   ]
+  },
+  {
+   "num": 7,
+   "id": "amazon-s3",
+   "title": "Amazon S3",
+   "date": "2026-11-15",
+   "focus": [
+    "Blob storage",
+    "Erasure coding",
+    "Metadata"
+   ]
+  },
+  {
+   "num": 8,
+   "id": "chatgpt",
+   "title": "ChatGPT",
+   "date": "2026-11-18",
+   "focus": [
+    "GPU serving",
+    "Streaming",
+    "Batching"
+   ]
+  },
+  {
+   "num": 9,
+   "id": "stock-exchange",
+   "title": "Stock Exchange",
+   "date": "2026-11-21",
+   "focus": [
+    "Matching engine",
+    "Low latency",
+    "Sequencing"
+   ]
+  },
+  {
+   "num": 10,
+   "id": "google-docs",
+   "title": "Google Docs",
+   "date": "2026-11-24",
+   "focus": [
+    "OT / CRDT",
+    "Collaboration",
+    "WebSockets"
+   ]
+  },
+  {
+   "num": 11,
+   "id": "meta-serverless",
+   "title": "Meta Serverless",
+   "date": "2026-11-27",
+   "focus": [
+    "Scheduling",
+    "Queues",
+    "Autoscaling"
+   ]
+  },
+  {
+   "num": 12,
+   "id": "bluesky",
+   "title": "Bluesky",
+   "date": "2026-11-30",
+   "focus": [
+    "Federation",
+    "Firehose",
+    "Feeds"
+   ]
+  },
+  {
+   "num": 13,
+   "id": "reddit",
+   "title": "Reddit",
+   "date": "2026-12-03",
+   "focus": [
+    "Voting",
+    "Ranking",
+    "Comment trees"
+   ]
+  },
+  {
+   "num": 14,
+   "id": "spotify",
+   "title": "Spotify",
+   "date": "2026-12-06",
+   "focus": [
+    "Streaming",
+    "CDN",
+    "Recommendations"
+   ]
+  },
+  {
+   "num": 15,
+   "id": "youtube",
+   "title": "YouTube",
+   "date": "2026-12-09",
+   "focus": [
+    "Transcoding",
+    "CDN",
+    "Adaptive bitrate"
+   ]
+  },
+  {
+   "num": 16,
+   "id": "instagram",
+   "title": "Instagram",
+   "date": "2026-12-12",
+   "focus": [
+    "Media pipeline",
+    "Feed",
+    "Stories"
+   ]
+  },
+  {
+   "num": 17,
+   "id": "banking-sales-system",
+   "title": "Banking Sales System",
+   "date": "2026-12-15",
+   "focus": [
+    "Ledger",
+    "Idempotency",
+    "Sagas"
+   ]
+  },
+  {
+   "num": 18,
+   "id": "vs-code",
+   "title": "VS Code",
+   "date": "2026-12-18",
+   "focus": [
+    "LSP",
+    "Process isolation",
+    "Remote dev"
+   ]
+  },
+  {
+   "num": 19,
+   "id": "figma-collaboration",
+   "title": "Figma Live Collaboration",
+   "date": "2026-12-21",
+   "focus": [
+    "Multiplayer",
+    "LWW",
+    "WebSockets"
+   ]
+  },
+  {
+   "num": 20,
+   "id": "ai-systems",
+   "title": "AI Systems",
+   "date": "2026-12-24",
+   "focus": [
+    "ML platform",
+    "Inference",
+    "Guardrails"
+   ]
+  },
+  {
+   "num": 21,
+   "id": "agentic-ai",
+   "title": "Agentic AI Systems",
+   "date": "2026-12-27",
+   "focus": [
+    "Agents",
+    "Tool use",
+    "Memory"
+   ]
+  },
+  {
+   "num": 22,
+   "id": "mcp-rag-orchestration",
+   "title": "MCP + RAG Orchestration",
+   "date": "2026-12-30",
+   "focus": [
+    "MCP",
+    "RAG",
+    "LangGraph"
+   ]
+  },
+  {
+   "num": 23,
+   "id": "dropbox",
+   "title": "Dropbox / Google Drive",
+   "date": "2027-01-02",
+   "focus": [
+    "Chunking",
+    "Dedup",
+    "Sync"
+   ]
+  },
+  {
+   "num": 24,
+   "id": "web-crawler",
+   "title": "Web Crawler",
+   "date": "2027-01-05",
+   "focus": [
+    "Frontier",
+    "Politeness",
+    "Bloom filters"
+   ]
+  },
+  {
+   "num": 25,
+   "id": "notification-system",
+   "title": "Notification System",
+   "date": "2027-01-08",
+   "focus": [
+    "Queues",
+    "Idempotency",
+    "Fan-out"
+   ]
+  },
+  {
+   "num": 26,
+   "id": "yelp-proximity",
+   "title": "Yelp / Proximity Service",
+   "date": "2027-01-11",
+   "focus": [
+    "Geohash",
+    "Quadtree",
+    "Read-heavy"
+   ]
+  },
+  {
+   "num": 27,
+   "id": "ticketmaster",
+   "title": "Ticketmaster",
+   "date": "2027-01-14",
+   "focus": [
+    "Contention",
+    "Reservations",
+    "Waiting room"
+   ]
+  },
+  {
+   "num": 28,
+   "id": "payment-system",
+   "title": "Payment System (Stripe)",
+   "date": "2027-01-17",
+   "focus": [
+    "Idempotency",
+    "Ledger",
+    "Reconciliation"
+   ]
+  },
+  {
+   "num": 29,
+   "id": "google-maps",
+   "title": "Google Maps",
+   "date": "2027-01-20",
+   "focus": [
+    "Tiles",
+    "Routing",
+    "Traffic"
+   ]
+  },
+  {
+   "num": 30,
+   "id": "ad-click-aggregator",
+   "title": "Ad Click Aggregator",
+   "date": "2027-01-23",
+   "focus": [
+    "Streaming",
+    "Windows",
+    "Exactly-once"
+   ]
+  },
+  {
+   "num": 31,
+   "id": "metrics-monitoring",
+   "title": "Metrics & Monitoring",
+   "date": "2027-01-26",
+   "focus": [
+    "Time series",
+    "Alerting",
+    "Cardinality"
+   ]
+  },
+  {
+   "num": 32,
+   "id": "job-scheduler",
+   "title": "Distributed Job Scheduler",
+   "date": "2027-01-29",
+   "focus": [
+    "Leases",
+    "Queues",
+    "Retries"
+   ]
+  },
+  {
+   "num": 33,
+   "id": "whatsapp",
+   "title": "WhatsApp",
+   "date": "2027-02-01",
+   "focus": [
+    "Inbox",
+    "Receipts",
+    "E2E"
+   ]
+  },
+  {
+   "num": 34,
+   "id": "distributed-kv-store",
+   "title": "Distributed KV Store",
+   "date": "2027-02-04",
+   "focus": [
+    "Quorums",
+    "Gossip",
+    "LSM"
+   ]
+  }
+ ]
+}

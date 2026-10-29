@@ -1,0 +1,240 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "styles",
+   "title": "API styles",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Style",
+      "Strengths",
+      "Weaknesses",
+      "Use for"
+     ],
+     "rows": [
+      [
+       "REST (JSON over HTTP)",
+       "Universal, cacheable, simple tooling",
+       "Over/under-fetching; many round trips",
+       "Public APIs, CRUD"
+      ],
+      [
+       "GraphQL",
+       "Client picks fields; one round trip for nested data",
+       "Caching is harder; expensive queries need limits",
+       "Rich client apps with varied screens"
+      ],
+      [
+       "gRPC (Protobuf over HTTP/2)",
+       "Fast, typed contracts, streaming",
+       "Not browser-native; binary debugging",
+       "Internal service-to-service calls"
+      ],
+      [
+       "Webhooks",
+       "Push events to third parties",
+       "Delivery/retry/security are on you",
+       "Notifying integrators"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "rest",
+   "title": "Designing a REST API well",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "GET    /v1/users/42/orders?status=paid&limit=20&cursor=eyJpZCI6...   # list, filtered, paginated\nPOST   /v1/orders                     Idempotency-Key: 7f3c…        # create\nGET    /v1/orders/981                                              # read\nPATCH  /v1/orders/981   If-Match: \"v7\"  {\"shipping_address\": …}     # partial update, optimistic lock\nDELETE /v1/orders/981"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Nouns for resources, HTTP verbs for actions; plural collections.",
+      "**Cursor pagination** (opaque cursor encoding the last key) instead of offset for large or changing lists.",
+      "Idempotency keys on POSTs that create side effects; ETag/If-Match for concurrent edits.",
+      "Version in the path (/v1) or header; never break existing clients.",
+      "Consistent errors: status code + machine-readable code + message."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "realtime",
+   "title": "Getting updates to clients in real time",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Technique",
+      "How it works",
+      "Good for",
+      "Costs"
+     ],
+     "rows": [
+      [
+       "Short polling",
+       "Client asks every N seconds",
+       "Rare updates, simple",
+       "Wasted requests, latency up to N"
+      ],
+      [
+       "Long polling",
+       "Server holds the request until there's data or a timeout",
+       "Works everywhere",
+       "One held request per client"
+      ],
+      [
+       "Server-Sent Events",
+       "One long HTTP response streaming events",
+       "Server → client feeds, LLM token streams",
+       "One direction; text only"
+      ],
+      [
+       "WebSocket",
+       "Upgraded TCP connection, bidirectional frames",
+       "Chat, collaboration, games",
+       "Stateful connections to scale and balance"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ws",
+   "title": "Scaling WebSockets",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Clients",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "L4 load balancer",
+        "kind": "edge",
+        "sub": "long-lived TCP"
+       }
+      ],
+      [
+       {
+        "label": "WS gateway 1",
+        "kind": "service",
+        "sub": "~100k conns"
+       },
+       {
+        "label": "WS gateway 2",
+        "kind": "service"
+       },
+       {
+        "label": "WS gateway N",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Connection registry",
+        "kind": "cache",
+        "sub": "user → gateway"
+       },
+       {
+        "label": "Pub/sub",
+        "kind": "queue",
+        "sub": "Redis / Kafka / NATS"
+       }
+      ],
+      [
+       {
+        "label": "Backend services",
+        "kind": "service"
+       }
+      ]
+     ],
+     "caption": "Gateway tier holds connections; pub/sub routes messages"
+    },
+    {
+     "t": "seq",
+     "actors": [
+      "Sender",
+      "Gateway A",
+      "Pub/sub",
+      "Gateway B",
+      "Recipient"
+     ],
+     "steps": [
+      {
+       "from": "Sender",
+       "to": "Gateway A",
+       "label": "send(msg to bob)"
+      },
+      {
+       "from": "Gateway A",
+       "to": "Pub/sub",
+       "label": "publish channel:bob"
+      },
+      {
+       "from": "Pub/sub",
+       "to": "Gateway B",
+       "label": "deliver",
+       "note": "B subscribed for bob"
+      },
+      {
+       "from": "Gateway B",
+       "to": "Recipient",
+       "label": "push frame"
+      },
+      {
+       "from": "Recipient",
+       "to": "Gateway B",
+       "label": "ack",
+       "dashed": true
+      }
+     ],
+     "caption": "Delivering a message to a user connected to another gateway"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Gateways are thin: auth, heartbeats, and relaying; business logic stays in stateless services.",
+      "On deploy or crash, clients reconnect (with jittered backoff) and resume from a last-seen sequence number.",
+      "Heartbeats (ping/pong every ~30 s) detect dead connections behind NATs and proxies."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "webhooks",
+   "title": "Webhooks done properly",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Sign payloads (HMAC with a per-endpoint secret) and include a timestamp to prevent replay.",
+      "Deliver at-least-once from an outbox with exponential backoff over hours/days; expose a delivery log and manual redelivery.",
+      "Receivers dedupe on event id and respond 2xx fast, processing asynchronously."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "interview",
+   "title": "Choosing in an interview",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Public CRUD is REST with cursor pagination and idempotency keys; internal calls are gRPC; live updates use WebSockets through a gateway tier with a connection registry and pub/sub, falling back to SSE where only server-to-client is needed."
+    }
+   ]
+  }
+ ]
+}

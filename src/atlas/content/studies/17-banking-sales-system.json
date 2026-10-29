@@ -1,0 +1,503 @@
+{
+ "id": "banking-sales-system",
+ "num": 17,
+ "title": "Banking Sales System",
+ "summary": "A bank's product-sales and transaction platform: customer onboarding with KYC, an order/application workflow, a double-entry ledger as the source of truth, idempotent payments, and an auditable event trail with end-of-day reconciliation.",
+ "tags": [
+  "Ledger",
+  "Idempotency",
+  "Sagas",
+  "Audit"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "transactions-locks",
+  "patterns",
+  "resilience",
+  "consistency",
+  "ops-security"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Framing: design the system a bank uses to sell products (accounts, cards, loans, FDs) to customers through branches, relationship managers and digital channels, and to process the resulting money movements."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Customer onboarding with KYC/AML checks"
+      ],
+      [
+       "Functional",
+       "Product catalogue and eligibility; applications and approvals (credit checks)"
+      ],
+      [
+       "Functional",
+       "Fund transfers, payments, fees, interest postings"
+      ],
+      [
+       "Functional",
+       "Sales pipeline for RMs (leads, opportunities, commissions); statements"
+      ],
+      [
+       "Non-functional",
+       "Money is never created, lost or double-posted (strong consistency)"
+      ],
+      [
+       "Non-functional",
+       "Full audit trail; regulatory reporting; data residency"
+      ],
+      [
+       "Non-functional",
+       "99.95%+ availability for payments; idempotent APIs end to end"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Customers",
+       "value": "20M",
+       "sub": ""
+      },
+      {
+       "label": "Transactions / day",
+       "value": "50M",
+       "sub": "≈ 600/s avg, ~5k/s peak (salary day)"
+      },
+      {
+       "label": "Applications / day",
+       "value": "200k",
+       "sub": "loans, cards, accounts"
+      },
+      {
+       "label": "Ledger rows / year",
+       "value": "~40B",
+       "sub": "2 entries per txn"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Throughput is modest by internet standards; the design is driven by correctness, auditability and peak days like salary credits and month-end interest runs."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/customers                 { profile, documents }     -> { customerId, kycStatus }\nPOST /v1/applications              { customerId, productId, data } -> { applicationId, status: SUBMITTED }\nPOST /v1/transfers   Idempotency-Key: <uuid>\n     { fromAccount, toAccount, amount: {value: '1500.00', currency: 'INR'}, reference }\n     -> 201 { transferId, status: PENDING | COMPLETED }\nGET  /v1/accounts/{id}/balance     GET /v1/accounts/{id}/statement?from&to"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model: double-entry ledger",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Table",
+      "Key fields",
+      "Rule"
+     ],
+     "rows": [
+      [
+       "accounts",
+       "account_id, customer_id, product, currency, status",
+       "Each customer product is an account; bank has internal GL accounts too"
+      ],
+      [
+       "journal_entries",
+       "entry_id, txn_id, created_at, description",
+       "One business transaction = one journal entry"
+      ],
+      [
+       "postings",
+       "posting_id, entry_id, account_id, amount (+/−), currency",
+       "Sum of postings per entry = 0 (debits = credits)"
+      ],
+      [
+       "balances",
+       "account_id, available, ledger, version",
+       "Derived; updated in the same DB transaction as postings"
+      ],
+      [
+       "idempotency_keys",
+       "key, request_hash, response",
+       "Unique constraint"
+      ],
+      [
+       "audit_log",
+       "who, what, when, before/after",
+       "Append-only, tamper-evident"
+      ]
+     ]
+    },
+    {
+     "t": "code",
+     "lang": "sql",
+     "text": "-- transfer 1500 from A to B, atomically\nBEGIN;\nSELECT balance FROM balances WHERE account_id = 'A' FOR UPDATE;   -- check funds\nINSERT INTO journal_entries(entry_id, txn_id) VALUES ($e, $t);\nINSERT INTO postings VALUES ($p1, $e, 'A', -1500.00, 'INR'), ($p2, $e, 'B', +1500.00, 'INR');\nUPDATE balances SET ledger = ledger - 1500, version = version + 1 WHERE account_id = 'A';\nUPDATE balances SET ledger = ledger + 1500, version = version + 1 WHERE account_id = 'B';\nINSERT INTO outbox(...) VALUES ('TransferCompleted', ...);\nCOMMIT;"
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Store money as integers in minor units or DECIMAL — never floating point. Postings are immutable; corrections are new reversing entries."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Branch / RM CRM",
+        "kind": "client"
+       },
+       {
+        "label": "Mobile & net banking",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "API gateway",
+        "kind": "edge",
+        "sub": "auth, idempotency, rate limit"
+       }
+      ],
+      [
+       {
+        "label": "Customer & KYC",
+        "kind": "service"
+       },
+       {
+        "label": "Sales / applications",
+        "kind": "service",
+        "sub": "workflow"
+       },
+       {
+        "label": "Payments",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Core ledger",
+        "kind": "db",
+        "sub": "double-entry, ACID"
+       },
+       {
+        "label": "Kafka",
+        "kind": "queue",
+        "sub": "outbox events"
+       }
+      ],
+      [
+       {
+        "label": "Credit bureau / KYC vendors",
+        "kind": "ext"
+       },
+       {
+        "label": "Payment rails (UPI, NEFT, SWIFT)",
+        "kind": "ext"
+       },
+       {
+        "label": "Reporting / warehouse",
+        "kind": "db"
+       }
+      ]
+     ],
+     "caption": "Channels → domain services → ledger as the single source of truth"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Customer onboarding stores documents, runs KYC/AML checks asynchronously, and sets kycStatus.",
+      "Application workflow (orchestrated saga): eligibility → credit check → underwriting decision → account creation in the core ledger → card issuance / disbursement.",
+      "Transfers: gateway checks the idempotency key; payments service posts to the ledger in one ACID transaction; external rails are called via outbox with retries and reconciliation.",
+      "Events feed CRM (commissions, sales dashboards), notifications, fraud and the regulatory warehouse."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "workflow",
+   "title": "Deep dive: loan application saga",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Submitted",
+       "text": "Validate data, store documents (encrypted)."
+      },
+      {
+       "title": "Credit check",
+       "text": "Call bureau; cache report; timeout + retry."
+      },
+      {
+       "title": "Decision",
+       "text": "Rules engine + model; manual review queue for edge cases."
+      },
+      {
+       "title": "Account opened",
+       "text": "Create loan account in ledger."
+      },
+      {
+       "title": "Disbursed",
+       "text": "Post disbursement entry; outbox → rails; compensate on failure."
+      },
+      {
+       "title": "Active",
+       "text": "Repayment schedule generated."
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "State machine persisted per application with version numbers; every transition audited with actor and reason.",
+      "Human tasks (maker-checker approvals) are steps with SLAs and escalation.",
+      "Compensation: if disbursement fails at the rail, reverse the posting with a new journal entry and notify."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "payments",
+   "title": "Deep dive: external payments and reconciliation",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Two-step posting: debit customer to a **suspense/clearing account** first, then settle when the rail confirms; failure reverses from suspense.",
+      "Rails are at-least-once and sometimes ambiguous (timeouts): query status by our reference before retrying.",
+      "End-of-day reconciliation: match our ledger postings with rail settlement files and bank statements; breaks go to an operations queue.",
+      "Batch jobs (interest accrual, fees) run as idempotent chunks keyed by (account, date), restartable."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The ledger is the source of truth; everything else is a projection. Any external call that moves money is idempotent, goes through a suspense account, and is reconciled daily."
+    }
+   ]
+  },
+  {
+   "id": "security",
+   "title": "Deep dive: security, compliance and audit",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "PII encrypted at rest with KMS; field-level encryption for IDs (PAN, Aadhaar); tokenization for card numbers (PCI DSS).",
+      "RBAC + maker-checker for high-risk actions; least privilege; break-glass access logged.",
+      "Audit log append-only with hash chaining (each record hashes the previous) for tamper evidence; retained per regulation (years).",
+      "Data residency (e.g. RBI data localization for payment data); DR site in-country; RPO ≈ 0 for ledger via synchronous replication.",
+      "Fraud: real-time scoring on transfers (velocity, device, geo), step-up auth (OTP) for risky ones."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Duplicate submit (double tap)",
+       "Double transfer",
+       "Idempotency key + unique constraint"
+      ],
+      [
+       "Rail timeout",
+       "Unknown outcome",
+       "Status inquiry, suspense account, reconciliation"
+      ],
+      [
+       "Hot account (bank GL, merchant)",
+       "Lock contention",
+       "Sub-accounts / sharded balances; batch posting to GL"
+      ],
+      [
+       "Salary-day spike",
+       "Latency",
+       "Queue bulk credits, process in parallel by account shard"
+      ],
+      [
+       "DC failure",
+       "Outage",
+       "Sync replication to DR, tested failover drills"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Ledger store",
+       "Relational ACID (sharded by account)",
+       "Easy horizontal writes"
+      ],
+      [
+       "Cross-service flows",
+       "Orchestrated sagas + outbox",
+       "Global transactions"
+      ],
+      [
+       "Balances",
+       "Updated synchronously with postings",
+       "Pure event-sourced derivation"
+      ],
+      [
+       "External money moves",
+       "Suspense + reconciliation",
+       "Simplicity"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Onboarding, applications, transfers, statements, audit."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "No money lost/duplicated; audit; compliance."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "5k txn/s peak; billions of postings."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "Idempotent transfers; double-entry tables."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Gateway → domain services → ledger; outbox → Kafka."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Ledger transaction, application saga, rails + reconciliation."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Security, DR, fraud, metrics: unreconciled breaks, saga age."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you shard a ledger?",
+       "a": "By account_id; a transfer between shards becomes a saga with a suspense/clearing account on each shard, or both accounts are routed to a shard pair; most banks keep core ledgers on a strongly consistent cluster."
+      },
+      {
+       "q": "How do you compute a balance quickly?",
+       "a": "Maintain a balances table updated in the same transaction; periodically verify it equals the sum of postings."
+      },
+      {
+       "q": "How do you handle FX?",
+       "a": "Postings per currency; an FX entry debits INR and credits USD through FX position accounts at a recorded rate."
+      },
+      {
+       "q": "How would you design RM commissions?",
+       "a": "Consume ApplicationApproved/AccountFunded events into a commissions service with rules per product; idempotent by application ID."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Double-entry: every entry's postings sum to zero.",
+      "Money in integer minor units or DECIMAL.",
+      "Idempotency keys on every money-moving API.",
+      "Suspense accounts for external rails; daily reconciliation.",
+      "Orchestrated sagas for applications; maker-checker steps.",
+      "Immutable postings; corrections are reversals.",
+      "Hash-chained audit log; encryption + tokenization."
+     ]
+    }
+   ]
+  }
+ ]
+}

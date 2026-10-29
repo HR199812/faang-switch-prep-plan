@@ -1,0 +1,479 @@
+{
+ "id": "stock-exchange",
+ "num": 9,
+ "title": "Stock Exchange",
+ "summary": "A deterministic, single-threaded in-memory matching engine per instrument behind a sequencer, with every event journaled so state can be replayed exactly — then trades flow into clearing and settlement.",
+ "tags": [
+  "Matching engine",
+  "Low latency",
+  "Sequencing",
+  "Post-trade"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "patterns",
+  "consensus",
+  "queues-kafka",
+  "transactions-locks",
+  "resilience"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Place / cancel / modify limit and market orders"
+      ],
+      [
+       "Functional",
+       "Match by price-time priority; publish trades and order-book updates (market data)"
+      ],
+      [
+       "Functional",
+       "Risk checks before orders enter the book; post-trade clearing and settlement feeds"
+      ],
+      [
+       "Non-functional",
+       "Matching latency in microseconds; p99 predictable (no GC pauses)"
+      ],
+      [
+       "Non-functional",
+       "Fairness: strict ordering of arrival"
+      ],
+      [
+       "Non-functional",
+       "Zero loss of acknowledged orders; deterministic recovery"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Instruments",
+       "value": "~10k",
+       "sub": "equities + derivatives"
+      },
+      {
+       "label": "Peak orders",
+       "value": "~1M/s",
+       "sub": "NSE handles billions of messages a day"
+      },
+      {
+       "label": "Orders : trades",
+       "value": "~20 : 1",
+       "sub": "most orders cancel"
+      },
+      {
+       "label": "Latency target",
+       "value": "< 50 µs",
+       "sub": "gateway to ack"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The scale isn't the problem — a single core can match millions of orders a second. Latency, determinism and fairness are the problems, which pushes everything in memory and single-threaded per instrument."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "text",
+     "text": "FIX / binary protocol over TCP (not REST):\nNewOrderSingle   { clOrdId, symbol, side, qty, price, type: LIMIT|MARKET, tif: DAY|IOC|FOK }\nOrderCancelRequest { origClOrdId }\nExecutionReport  { orderId, execType: NEW|PARTIAL_FILL|FILL|CANCELED|REJECTED, lastQty, lastPx }\nMarket data: multicast UDP feed of book deltas + trades, with sequence numbers"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Structure",
+      "Shape",
+      "Why"
+     ],
+     "rows": [
+      [
+       "Order book (per symbol)",
+       "Bids: price levels descending; asks ascending; each level a FIFO queue of orders",
+       "Price-time priority"
+      ],
+      [
+       "Price level index",
+       "Array indexed by tick or a tree map",
+       "O(1)/O(log n) best-price access"
+      ],
+      [
+       "Order lookup",
+       "orderId → node in the level queue",
+       "O(1) cancel"
+      ],
+      [
+       "Journal",
+       "Sequenced append-only event log",
+       "Replay = exact state rebuild"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Brokers / members",
+        "kind": "client",
+        "sub": "FIX"
+       }
+      ],
+      [
+       {
+        "label": "Order gateways",
+        "kind": "edge",
+        "sub": "session, validation"
+       },
+       {
+        "label": "Pre-trade risk",
+        "kind": "service",
+        "sub": "limits, margin"
+       }
+      ],
+      [
+       {
+        "label": "Sequencer",
+        "kind": "service",
+        "sub": "total order + journal"
+       }
+      ],
+      [
+       {
+        "label": "Matching engine",
+        "kind": "service",
+        "sub": "one thread per symbol shard"
+       },
+       {
+        "label": "Hot standby engine",
+        "kind": "service",
+        "sub": "replays same stream"
+       }
+      ],
+      [
+       {
+        "label": "Market data publisher",
+        "kind": "queue",
+        "sub": "multicast"
+       },
+       {
+        "label": "Drop copy / post-trade",
+        "kind": "queue",
+        "sub": "trades"
+       }
+      ],
+      [
+       {
+        "label": "Clearing house (CCP)",
+        "kind": "ext"
+       },
+       {
+        "label": "Settlement / depository",
+        "kind": "ext"
+       }
+      ]
+     ],
+     "caption": "Every input is sequenced, journaled, then applied deterministically"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Gateway validates and stamps the order; risk checks credit/position limits.",
+      "Sequencer assigns a global sequence number and writes it to a replicated journal.",
+      "Matching engine (and standby) consume the same sequence and apply it deterministically.",
+      "Outputs: execution reports to the member, book deltas to market data, trades to clearing."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "matching",
+   "title": "Deep dive: the matching engine",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "python",
+     "text": "def on_limit_buy(o):\n    while o.qty and asks.best() and asks.best().price <= o.price:\n        lvl = asks.best()\n        resting = lvl.queue[0]                 # time priority\n        q = min(o.qty, resting.qty)\n        emit_trade(o, resting, q, lvl.price)   # trade at resting price\n        o.qty -= q; resting.qty -= q\n        if resting.qty == 0: lvl.queue.popleft(); index.pop(resting.id)\n        if not lvl.queue: asks.remove(lvl)\n    if o.qty and o.tif == 'DAY': bids.add(o)   # rest the remainder"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Single-threaded per symbol: no locks, no contention, fully deterministic.",
+      "LMAX-style: ring buffer (Disruptor) between I/O and business logic; pre-allocated objects; no GC in the hot path (or C++/Rust).",
+      "Shard symbols across engines; one symbol never spans two threads."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key idea",
+     "text": "Determinism is the recovery strategy: same input sequence → same state, so a standby that replays the journal is an exact hot replica."
+    }
+   ]
+  },
+  {
+   "id": "fairness",
+   "title": "Deep dive: sequencing, fairness, and market data",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Fairness = one total order of events from the sequencer; ties broken by sequence number, not wall clock.",
+      "Market data over UDP multicast with sequence numbers; subscribers detect gaps and request retransmission or snapshot.",
+      "Co-location and equal cable lengths for members; speed bumps in some venues.",
+      "Circuit breakers / price bands halt trading on extreme moves."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "post-trade",
+   "title": "Deep dive: post-trade (clearing, settlement, reconciliation)",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Trade capture",
+       "text": "Exchange emits trade with both sides, sequence and timestamp."
+      },
+      {
+       "title": "Clearing",
+       "text": "CCP novates: becomes buyer to every seller and seller to every buyer; computes margin."
+      },
+      {
+       "title": "Netting",
+       "text": "Positions netted per member per instrument to reduce settlements."
+      },
+      {
+       "title": "Settlement",
+       "text": "Delivery vs payment at the depository, e.g. T+1 in India and the US."
+      },
+      {
+       "title": "Reconciliation",
+       "text": "Member books vs CCP vs custodian; breaks investigated and corrected."
+      }
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Post-trade systems are event-driven pipelines where idempotency keys (trade IDs), exactly-once processing and full audit trails matter more than microseconds.",
+      "This is where an interviewer at a bank will probe: duplicate trade messages, late amendments, cancels/corrections and end-of-day reconciliation."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Pre-trade is a latency problem; post-trade is a correctness problem. I'd build post-trade as an event-sourced pipeline keyed by trade ID with idempotent consumers and daily reconciliation against the clearing house."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Primary engine crash",
+       "Trading pause",
+       "Hot standby already replaying; failover in ms, resume from last sequence"
+      ],
+      [
+       "Journal node loss",
+       "Possible order loss",
+       "Replicate journal synchronously to a quorum before ack"
+      ],
+      [
+       "Market data gap",
+       "Subscribers' books wrong",
+       "Sequence numbers + retransmit / snapshot service"
+      ],
+      [
+       "Runaway algo",
+       "Flood of orders",
+       "Per-member throttles, kill switch, fat-finger price checks"
+      ],
+      [
+       "Hot symbol",
+       "One engine saturated",
+       "Dedicated core/engine for that symbol"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Concurrency",
+       "Single thread per symbol",
+       "Cross-symbol atomicity"
+      ],
+      [
+       "Storage",
+       "In-memory + journal",
+       "Queryable DB in the hot path"
+      ],
+      [
+       "Transport",
+       "Binary TCP + multicast",
+       "Developer-friendly REST"
+      ],
+      [
+       "Recovery",
+       "Deterministic replay",
+       "Freedom to use non-deterministic code"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Order types, matching, market data, risk."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "µs latency, fairness, no loss."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "1M orders/s fits single cores per symbol."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "FIX; order book as price levels + FIFO."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Gateway → risk → sequencer/journal → engine → outputs."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Matching loop, determinism + standby, post-trade."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Kill switches, gap recovery, latency histograms."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you cancel an order in O(1)?",
+       "a": "Keep orderId → node pointer into the doubly linked FIFO at its price level."
+      },
+      {
+       "q": "Why not use Kafka as the sequencer?",
+       "a": "Millisecond latency and partition-only ordering; exchanges use custom replicated sequencers with µs latency. Kafka fits downstream (post-trade, analytics)."
+      },
+      {
+       "q": "How do you support market-wide auctions (open/close)?",
+       "a": "Collect orders without matching, compute the price maximizing executable volume, uncross once."
+      },
+      {
+       "q": "How do brokers avoid duplicate orders on reconnect?",
+       "a": "clOrdId uniqueness per session; gateway rejects duplicates; FIX sequence numbers resend gaps."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Price-time priority: best price, then earliest.",
+      "One thread per symbol; no locks; no GC in hot path.",
+      "Sequencer + journal → deterministic replay → hot standby.",
+      "Market data: multicast + sequence numbers + snapshots.",
+      "Post-trade: novation, netting, DvP settlement, reconciliation.",
+      "Pre-trade = latency; post-trade = correctness."
+     ]
+    }
+   ]
+  }
+ ]
+}

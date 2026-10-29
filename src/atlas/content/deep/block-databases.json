@@ -1,0 +1,206 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "choose",
+   "title": "Choosing a database is choosing access patterns",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Interviewers don't want a list of database brands; they want you to pick storage based on how the data is read and written. Start from the queries: \"get a user by id\", \"latest 50 messages in a channel\", \"all orders for a customer this month\", \"count of clicks per ad per minute\". Each pattern has a natural home."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Family",
+      "Examples",
+      "Strengths",
+      "Watch out for"
+     ],
+     "rows": [
+      [
+       "Relational (OLTP)",
+       "Postgres, MySQL",
+       "Transactions, joins, constraints, flexible queries",
+       "Write scaling beyond one primary needs sharding"
+      ],
+      [
+       "Key-value",
+       "DynamoDB, Redis",
+       "Predictable single-key latency at any scale",
+       "Queries other than by key need secondary indexes or duplication"
+      ],
+      [
+       "Wide-column",
+       "Cassandra, Bigtable, ScyllaDB",
+       "Huge write throughput, partition + clustering key ordering",
+       "Model per query; no joins; eventual consistency by default"
+      ],
+      [
+       "Document",
+       "MongoDB, Firestore",
+       "Nested objects, flexible schema",
+       "Cross-document transactions and joins are limited"
+      ],
+      [
+       "Search",
+       "Elasticsearch, OpenSearch",
+       "Full-text, relevance, aggregations",
+       "Not a source of truth; near-real-time indexing"
+      ],
+      [
+       "Columnar / OLAP",
+       "ClickHouse, BigQuery, Snowflake",
+       "Fast scans and aggregations over billions of rows",
+       "Slow single-row updates"
+      ],
+      [
+       "Graph",
+       "Neo4j",
+       "Multi-hop relationship queries",
+       "Scaling out is hard; often overkill"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Default to Postgres until a specific access pattern or scale requirement says otherwise — and name that requirement when you switch."
+    }
+   ]
+  },
+  {
+   "id": "indexes",
+   "title": "How an index works",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Without an index, a query scans every row. A **B-tree index** keeps the indexed column(s) sorted in a balanced tree whose leaves point at rows; finding one value takes O(log n) page reads (3–4 levels for a billion rows), and range queries walk adjacent leaves. The cost: every insert/update must also update each index, and indexes consume disk and memory."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Index type",
+      "Good for"
+     ],
+     "rows": [
+      [
+       "B-tree (default)",
+       "Equality and range: =, <, >, BETWEEN, ORDER BY, prefix LIKE 'abc%'"
+      ],
+      [
+       "Hash",
+       "Equality only"
+      ],
+      [
+       "Composite (a, b, c)",
+       "Queries filtering on a, a+b, or a+b+c — the leftmost-prefix rule"
+      ],
+      [
+       "Covering / INCLUDE",
+       "Answering a query entirely from the index (index-only scan)"
+      ],
+      [
+       "Partial",
+       "Indexing only rows matching a predicate, e.g. WHERE status = 'active'"
+      ],
+      [
+       "GIN / inverted",
+       "Arrays, JSONB, full-text in Postgres"
+      ],
+      [
+       "Geospatial (GiST, R-tree)",
+       "Nearby / bounding-box queries"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "composite",
+   "title": "Composite indexes and the leftmost-prefix rule",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "sql",
+     "text": "-- Query: latest messages in a channel\nSELECT * FROM messages\n WHERE channel_id = $1 AND created_at < $2\n ORDER BY created_at DESC\n LIMIT 50;\n\n-- Index that serves it with no sort and no scan:\nCREATE INDEX idx_messages_channel_time ON messages (channel_id, created_at DESC);"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Order columns by: equality filters first, then the range / sort column.",
+      "An index on (channel_id, created_at) helps `WHERE channel_id = ?` but not `WHERE created_at > ?` alone.",
+      "Use `EXPLAIN ANALYZE` to confirm the plan uses the index."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "modeling",
+   "title": "Data modeling for scale",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Normalise** in OLTP to avoid update anomalies; **denormalise** deliberately for read-heavy paths (store author_name on a post if it's read millions of times).",
+      "In NoSQL, model **per query**: in Cassandra, a table per access pattern with partition key = what you look up by, clustering key = how you sort within it.",
+      "Keep partitions bounded — a chat channel's messages partitioned by (channel_id, month) rather than channel_id forever.",
+      "Pagination: use keyset (cursor) pagination `WHERE created_at < last_seen` instead of OFFSET, which scans and discards rows."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "scaling",
+   "title": "Scaling a relational database, in order",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Indexes & query fixes",
+       "text": "Most slow databases are missing an index or running N+1 queries."
+      },
+      {
+       "title": "Vertical scale",
+       "text": "Bigger instance, more RAM for the buffer pool."
+      },
+      {
+       "title": "Caching",
+       "text": "Take hot reads off the DB."
+      },
+      {
+       "title": "Read replicas",
+       "text": "Route reads to replicas; accept replication lag."
+      },
+      {
+       "title": "Partitioning",
+       "text": "Split huge tables by time or key within one server."
+      },
+      {
+       "title": "Sharding",
+       "text": "Split data across primaries when writes exceed one machine."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Jumping to sharding first. It's the most expensive step operationally; show you'd exhaust the cheaper steps."
+    }
+   ]
+  },
+  {
+   "id": "isolation",
+   "title": "Transactions and isolation levels (preview)",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "ACID transactions are the main reason to choose a relational database. Isolation levels trade anomalies for concurrency — Read Committed (Postgres default) prevents dirty reads; Repeatable Read / Snapshot prevents non-repeatable reads; Serializable prevents everything, including write skew, at the cost of retries. See the Transactions & Locks block for the details."
+    }
+   ]
+  }
+ ]
+}

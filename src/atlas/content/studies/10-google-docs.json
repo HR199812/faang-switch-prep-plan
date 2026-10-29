@@ -1,0 +1,423 @@
+{
+ "id": "google-docs",
+ "num": 10,
+ "title": "Google Docs",
+ "summary": "Real-time collaborative editing: clients send operations over WebSockets to a per-document server that orders and transforms them (OT), or merge-friendly CRDTs reconcile edits without a central order.",
+ "tags": [
+  "OT / CRDT",
+  "Collaboration",
+  "WebSockets",
+  "Versioning"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "apis-realtime",
+  "consistency",
+  "sharding",
+  "patterns"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Many users edit the same document concurrently; see each other's changes and cursors live"
+      ],
+      [
+       "Functional",
+       "Offline edits merge on reconnect; version history and restore"
+      ],
+      [
+       "Functional",
+       "Comments, suggestions, sharing permissions"
+      ],
+      [
+       "Non-functional",
+       "Remote edits visible < 200 ms; local typing never waits on the network"
+      ],
+      [
+       "Non-functional",
+       "All replicas converge to the same document (no lost keystrokes)"
+      ],
+      [
+       "Non-functional",
+       "Up to ~100 concurrent editors per doc; billions of docs"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Active docs",
+       "value": "~10M",
+       "sub": "open concurrently"
+      },
+      {
+       "label": "Ops / s",
+       "value": "~5M",
+       "sub": "keystrokes batched"
+      },
+      {
+       "label": "Editors / doc",
+       "value": "1–100",
+       "sub": "most docs: 1"
+      },
+      {
+       "label": "Op size",
+       "value": "~50 B",
+       "sub": "position + chars"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Load per document is tiny; the challenge is correctness — making concurrent edits converge — and routing all editors of a doc to the same place."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "text",
+     "text": "WS /docs/{id}\n client → server: { op: [retain 10, insert 'hi'], baseRev: 41, clientId, seq }\n server → client: { ack: seq, rev: 42 }  |  { op: <transformed>, rev: 43, author }\n presence:        { cursor: {anchor, head}, user }\nGET /docs/{id}?rev=N      (snapshot)   GET /docs/{id}/history"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Data",
+      "Key",
+      "Notes"
+     ],
+     "rows": [
+      [
+       "Operation log",
+       "(doc_id, rev)",
+       "Append-only; the source of truth"
+      ],
+      [
+       "Snapshots",
+       "(doc_id, rev)",
+       "Every N ops so loading doesn't replay everything"
+      ],
+      [
+       "Doc metadata / ACL",
+       "doc_id",
+       "Owner, sharing, title"
+      ],
+      [
+       "Comments",
+       "(doc_id, comment_id)",
+       "Anchored to positions that are transformed with edits"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Editors",
+        "kind": "client",
+        "sub": "local model + pending ops"
+       }
+      ],
+      [
+       {
+        "label": "WebSocket gateway",
+        "kind": "edge"
+       },
+       {
+        "label": "Doc router",
+        "kind": "service",
+        "sub": "doc_id → session server"
+       }
+      ],
+      [
+       {
+        "label": "Document session server",
+        "kind": "service",
+        "sub": "orders + transforms ops"
+       }
+      ],
+      [
+       {
+        "label": "Op log",
+        "kind": "db",
+        "sub": "append-only"
+       },
+       {
+        "label": "Snapshot store",
+        "kind": "store"
+       },
+       {
+        "label": "Presence",
+        "kind": "cache"
+       }
+      ]
+     ],
+     "caption": "All editors of one document meet at one document session server"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Client applies the edit locally at once, then sends the op with the revision it was based on.",
+      "The session server (one owner per doc, via consistent hashing or a lease) transforms the op against ops committed since `baseRev`.",
+      "It appends to the op log, assigns rev N, acks the author and broadcasts the transformed op to others.",
+      "Clients transform incoming ops against their own unacknowledged ops before applying."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "ot",
+   "title": "Deep dive: operational transformation",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "text",
+     "text": "Doc: \"abc\"\nAlice: insert 'X' at 1  ->  \"aXbc\"\nBob:   delete at 2      ->  \"ab\"   (removes 'c')\nServer receives Alice first (rev 1). Bob's op was based on rev 0:\ntransform(delete@2, against insert@1) = delete@3\nResult everywhere: \"aXb\""
+    },
+    {
+     "t": "list",
+     "items": [
+      "Server is the single source of order, so OT only needs transform against concurrent ops — simpler than peer-to-peer OT.",
+      "Client keeps one in-flight op and buffers the rest (Jupiter / Google Wave model), reducing transform complexity.",
+      "Cursors and comment anchors are transformed like positions."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "crdt",
+   "title": "Deep dive: CRDTs as the alternative",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "OT (Google Docs)",
+       "pros": [
+        "Compact ops",
+        "Mature for rich text",
+        "Central server simplifies"
+       ],
+       "cons": [
+        "Needs a central ordering server",
+        "Transform functions are hard to get right"
+       ]
+      },
+      {
+       "title": "CRDT (Yjs, Automerge)",
+       "pros": [
+        "No central order needed; works peer-to-peer and offline",
+        "Merge is mathematically guaranteed"
+       ],
+       "cons": [
+        "Metadata overhead (unique IDs per character)",
+        "Tombstones grow; needs compaction"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "With a server in the loop anyway, OT is a solid choice; if offline-first or peer-to-peer matters more, I'd use a sequence CRDT like Yjs and still relay through a server for persistence."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Session server dies",
+       "Editors disconnected",
+       "Lease expires, new owner loads snapshot + op log tail; clients resend unacked ops"
+      ],
+      [
+       "Two servers think they own a doc",
+       "Divergent histories",
+       "Lease with fencing token on op-log appends (conditional on last rev)"
+      ],
+      [
+       "Long offline edit",
+       "Huge transform",
+       "Rebase in chunks; CRDT merge; warn on conflicts"
+      ],
+      [
+       "Viral doc (10k viewers)",
+       "Broadcast load",
+       "Viewers read-only via fan-out tier; editors capped"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Algorithm",
+       "Server-ordered OT",
+       "Peer-to-peer editing"
+      ],
+      [
+       "Ownership",
+       "One server per doc",
+       "Horizontal scale within a doc"
+      ],
+      [
+       "Storage",
+       "Op log + snapshots",
+       "Simple last-write-wins blob"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Concurrent edit, cursors, offline, history."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Local-first typing, convergence."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "Small per-doc load; millions of docs."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "Ops over WS; op log keyed (doc, rev)."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Router → per-doc session server → op log."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "OT transform example, OT vs CRDT, ownership + failover."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Snapshot cadence, viral docs, convergence tests."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How is version history built?",
+       "a": "Snapshots plus op log; group ops by author and time into named revisions; restore = new ops that recreate the old state."
+      },
+      {
+       "q": "How do suggestions work?",
+       "a": "Ops marked as suggestions in a separate layer, rendered differently, accepted by converting to normal ops."
+      },
+      {
+       "q": "Why not lock paragraphs?",
+       "a": "Locks hurt the live-collaboration experience and fail badly offline; OT/CRDT avoid them."
+      },
+      {
+       "q": "How do you test convergence?",
+       "a": "Fuzz testing: random concurrent ops from simulated clients, assert all replicas end identical."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Apply locally first, send op with base revision.",
+      "One session server per doc orders ops.",
+      "OT: transform concurrent ops; CRDT: merge by unique IDs.",
+      "Op log + snapshots = history and recovery.",
+      "Lease + fencing to avoid two owners.",
+      "Cursors and comments are transformed positions."
+     ]
+    }
+   ]
+  }
+ ]
+}

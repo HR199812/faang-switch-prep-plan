@@ -1,0 +1,119 @@
+{
+ "id": "2026-10-29",
+ "date": "2026-10-29",
+ "slot": "8 PM",
+ "topic": "Redis Deep Dive + review",
+ "title": "Redis under pressure",
+ "questions": [
+  {
+   "q": "You're building a gaming leaderboard: 20M players, scores change constantly, and the app shows the top 100 plus each player's own rank. Which Redis structure and commands?",
+   "options": [
+    "A Hash per player, then sort in the app server",
+    "A Sorted Set: `ZINCRBY` on score change, `ZREVRANGE 0 99` for the top, `ZREVRANK` for own rank",
+    "A List kept sorted with `LINSERT`",
+    "One String per player and a `SCAN` across all keys"
+   ],
+   "answer": 1,
+   "why": "Sorted sets keep members ordered by score in a skip list, so updates and rank lookups are O(log N). Sorting hashes in the app means reading 20M entries per request; `SCAN` is O(N) and not ordered."
+  },
+  {
+   "q": "Workers acquire a Redis lock with `SET lock:job42 1 NX PX 30000` and release with `DEL lock:job42`. In production, two workers sometimes process the same job. What's the bug?",
+   "options": [
+    "`NX` isn't atomic on a single Redis node",
+    "The PX value should be in seconds",
+    "A slow worker whose lock expired runs `DEL` and deletes the new holder's lock; store a unique token and release with a Lua compare-and-delete",
+    "Redis needs MULTI/EXEC around SET"
+   ],
+   "answer": 2,
+   "why": "`SET NX PX` is atomic, so acquisition is fine. The release is unsafe: without a per-holder token, a worker that overran its TTL deletes someone else's lock. Use a UUID value, a Lua script that deletes only if the value matches, and fencing tokens if storage writes must be protected."
+  },
+  {
+   "q": "You need daily unique visitors for each of 50,000 pages. Exact counts aren't needed, and keeping a Set of user IDs per page is costing gigabytes. Best fit?",
+   "options": [
+    "HyperLogLog per page per day: `PFADD` on visit, `PFCOUNT` to read (about 12 KB each, ~0.8% error)",
+    "A Bitmap indexed by page ID",
+    "A Sorted Set of user IDs per page",
+    "`INCR` a counter on every page view"
+   ],
+   "answer": 0,
+   "why": "HyperLogLog estimates cardinality in fixed ~12 KB with ~0.81% standard error, and `PFMERGE` gives weekly rollups. `INCR` counts views, not unique users. Sorted sets cost as much memory as the Set you're replacing."
+  },
+  {
+   "q": "On Redis Cluster, a Lua script that touches `cart:42` and `inventory:42` fails with CROSSSLOT. What's the fix?",
+   "options": [
+    "Turn off cluster mode for that script",
+    "Run the two commands separately inside MULTI/EXEC",
+    "Increase the number of hash slots",
+    "Use hash tags such as `{u42}:cart` and `{u42}:inventory` so both keys hash to the same slot"
+   ],
+   "answer": 3,
+   "why": "Cluster hashes only the part inside `{}` when present, so tagged keys share a slot and multi-key ops and scripts work. MULTI/EXEC has the same single-slot rule, and the slot count is fixed at 16,384. Watch for hot slots if one tag gets too much traffic."
+  },
+  {
+   "q": "Your team wants to use Redis as the only store for wallet balances. It runs AOF with `appendfsync everysec` and async replicas with Sentinel failover. What's the real risk?",
+   "options": [
+    "None; AOF makes Redis fully durable",
+    "Up to about 1 s of acknowledged writes can be lost on a crash, and async failover can drop writes the old primary acked",
+    "Sentinel causes split-brain on every failover",
+    "AOF rewrites corrupt the data"
+   ],
+   "answer": 1,
+   "why": "`everysec` fsync can lose the last second, and replication is async, so a promoted replica may miss recent writes (`WAIT` reduces but doesn't remove this). For money, keep the ledger in a durable ACID store and use Redis as a cache or for counters you can rebuild."
+  },
+  {
+   "q": "You run delayed jobs (\"send a reminder in 15 minutes\") on Redis. Many workers poll for due jobs. How do you stop two workers claiming the same job?",
+   "options": [
+    "Store jobs in a List and have every worker `LRANGE` it",
+    "Put the run time in each job's TTL and listen for keyspace expiry events",
+    "Keep jobs in a Sorted Set scored by run time; claim with a Lua script that does `ZRANGEBYSCORE 0 now LIMIT` then `ZREM`, and process only jobs whose `ZREM` returned 1",
+    "Use Pub/Sub with a delay"
+   ],
+   "answer": 2,
+   "why": "The sorted set gives due-time ordering; the atomic claim (Lua, or `ZREM` returning 1) means exactly one worker wins each job. Keyspace notifications are fire-and-forget, so a disconnected listener misses jobs. Pub/Sub has no delay and no persistence."
+  },
+  {
+   "q": "Review (caching): a product API uses cache-aside. The code updates the DB and then sets the new value in the cache. Under concurrent writes, users sometimes see an old price for hours. Most robust fix?",
+   "options": [
+    "Delete the cache key after the DB write (not set it), keep a TTL as a safety net, and use versioned values or CDC-driven invalidation for hot keys",
+    "Set the cache first, then write the DB",
+    "Remove the TTL so entries never expire",
+    "Wrap the cache set in a DB transaction"
+   ],
+   "answer": 0,
+   "why": "Two writers can interleave so the older value is set last and stays until TTL. Invalidating instead of setting lets the next read load fresh data, and the TTL caps any remaining race. Writing the cache before the DB is worse, since a failed DB write leaves a value that never existed."
+  },
+  {
+   "q": "Review (URL shortener): you generate 7-character codes. Which approach avoids collisions without a DB uniqueness check on every create?",
+   "options": [
+    "Take the first 7 characters of MD5(longUrl)",
+    "Pick 7 random base62 characters",
+    "Hash the long URL and retry on conflict",
+    "Hand each app server a block of IDs from a counter service (for example 1,000 at a time) and base62-encode them"
+   ],
+   "answer": 3,
+   "why": "Range allocation gives unique IDs with one coordination call per block, so collisions are impossible. Truncated hashes and random codes collide as the table grows (birthday bound), which forces a check-and-retry. If sequential codes are a concern, apply a reversible shuffle before encoding."
+  },
+  {
+   "q": "Review (sharding): you shard users by `user_id mod 8`. One celebrity's follower writes swamp shard 3 while the others idle. What's the right first move?",
+   "options": [
+    "Go to `mod 16` and reshard everything",
+    "Split the hot key: spread that user's writes across N sub-keys or a dedicated shard, and aggregate on read",
+    "Add read replicas to shard 3",
+    "Switch the shard key to a timestamp"
+   ],
+   "answer": 1,
+   "why": "A hot key stays hot whatever the shard count, and replicas don't help a write hotspot. Key splitting (salting) spreads the load at the cost of fan-in reads. Timestamp keys create a moving hotspot on the newest shard."
+  },
+  {
+   "q": "Review (rate limiting): you need a strict limit of 100 requests per rolling 60 s per API key, across 20 gateway nodes, with no burst at window edges. Which implementation?",
+   "options": [
+    "A per-node in-memory fixed-window counter",
+    "Redis `INCR` with a fixed 60 s window",
+    "A Redis Sorted Set per key holding request timestamps: in one Lua script, `ZREMRANGEBYSCORE` old entries, `ZCARD`, then `ZADD` if under 100",
+    "A token bucket with capacity 1,000"
+   ],
+   "answer": 2,
+   "why": "A sliding-window log is exact and has no edge bursts. Running it as one Lua script makes the check-and-add atomic across all gateways. Fixed windows allow up to 2× at the boundary, per-node counters ignore the other 19 nodes, and a large bucket allows bursts. The cost is memory per request, so use a sliding-window counter at very high volume."
+  }
+ ]
+}

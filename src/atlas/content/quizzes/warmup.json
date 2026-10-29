@@ -1,0 +1,141 @@
+{
+ "id": "warmup",
+ "date": "2026-10-28",
+ "slot": "Starter",
+ "topic": "Mixed fundamentals",
+ "title": "Warm-up quiz",
+ "questions": [
+  {
+   "q": "A product page is read 50,000 times per second and updated a few times a day. Stale data for 60 s is fine. Best first move?",
+   "options": [
+    "Shard the database",
+    "Cache-aside with a 60 s TTL in Redis",
+    "Write-through cache",
+    "Add a message queue"
+   ],
+   "answer": 1,
+   "why": "Read-heavy and staleness-tolerant: cache-aside with a TTL bounded by the allowed staleness. Sharding solves write or size limits, not this."
+  },
+  {
+   "q": "A hot cache key expires and 10,000 requests hit the DB at once. What is this and the fix?",
+   "options": [
+    "Cache penetration; Bloom filter",
+    "Cache stampede; request coalescing or early refresh",
+    "Hot partition; reshard",
+    "Write skew; serializable isolation"
+   ],
+   "answer": 1,
+   "why": "Simultaneous misses on one expiring key = stampede. Coalesce (single-flight), lock per key, refresh early, or serve stale while revalidating."
+  },
+  {
+   "q": "Which rate limiter allows short bursts while enforcing an average rate?",
+   "options": [
+    "Fixed window counter",
+    "Leaky bucket",
+    "Token bucket",
+    "Sliding window log"
+   ],
+   "answer": 2,
+   "why": "Token bucket accumulates up to capacity B, so bursts up to B pass while the refill rate R caps the average."
+  },
+  {
+   "q": "You add a 5th node to a 4-node cluster that uses hash(key) mod N. Roughly what fraction of keys move?",
+   "options": [
+    "~20%",
+    "~50%",
+    "~80%",
+    "0%"
+   ],
+   "answer": 2,
+   "why": "With mod N almost every key changes home (only those where k mod 4 == k mod 5 stay). Consistent hashing would move ~1/5."
+  },
+  {
+   "q": "Two users try to book the last seat at the same moment. Conflicts are frequent on hot events. Best approach?",
+   "options": [
+    "Optimistic locking with retries",
+    "SELECT … FOR UPDATE or an atomic conditional UPDATE",
+    "Eventual consistency",
+    "Client-side check"
+   ],
+   "answer": 1,
+   "why": "High contention favours pessimistic locking or a single atomic `UPDATE … WHERE status='FREE'`; optimistic locking would retry constantly."
+  },
+  {
+   "q": "Why add a fencing token to a Redis-based distributed lock?",
+   "options": [
+    "Faster acquisition",
+    "To survive a holder whose lock expired during a GC pause",
+    "To make Redis persistent",
+    "To support reentrancy"
+   ],
+   "answer": 1,
+   "why": "If the lock expires while the old holder still acts, storage rejects its writes because their token is lower than the new holder's."
+  },
+  {
+   "q": "Kafka topic with 6 partitions; consumer group has 8 consumers. How many consumers are active?",
+   "options": [
+    "8",
+    "6",
+    "3",
+    "1"
+   ],
+   "answer": 1,
+   "why": "Each partition goes to exactly one consumer per group, so at most 6 are busy; 2 sit idle."
+  },
+  {
+   "q": "The practical way to get 'exactly once' processing with an external side effect is…",
+   "options": [
+    "At-most-once delivery",
+    "At-least-once delivery + idempotent consumer",
+    "Kafka transactions alone",
+    "Bigger batches"
+   ],
+   "answer": 1,
+   "why": "Kafka's EOS covers Kafka-to-Kafka. For DB writes or emails, dedupe by event ID in the consumer."
+  },
+  {
+   "q": "Service saves an order to Postgres and must publish OrderCreated to Kafka without losing either. Pattern?",
+   "options": [
+    "Two-phase commit",
+    "Transactional outbox + relay/CDC",
+    "Publish first, then save",
+    "Retry until both succeed"
+   ],
+   "answer": 1,
+   "why": "Write the event to an outbox table in the same DB transaction; a relay publishes it at least once."
+  },
+  {
+   "q": "With N = 3 replicas, which quorum setting guarantees reads see the latest write?",
+   "options": [
+    "W=1, R=1",
+    "W=1, R=2",
+    "W=2, R=2",
+    "W=3, R=0"
+   ],
+   "answer": 2,
+   "why": "W + R > N ensures the read set overlaps the write set: 2 + 2 > 3."
+  },
+  {
+   "q": "Server pushes LLM tokens to the browser one way. Simplest fitting transport?",
+   "options": [
+    "WebSocket",
+    "Server-Sent Events",
+    "Short polling",
+    "gRPC bidirectional"
+   ],
+   "answer": 1,
+   "why": "One-way server-to-client streaming over plain HTTP with auto-reconnect: SSE."
+  },
+  {
+   "q": "Find drivers within 2 km of a rider at Uber scale. Which index idea?",
+   "options": [
+    "B-tree on latitude",
+    "Geohash / H3 cells and neighbour lookup",
+    "Full-text index",
+    "Bloom filter"
+   ],
+   "answer": 1,
+   "why": "Cell-based indexes turn 2D proximity into key lookups on the rider's cell plus neighbours, then filter by distance."
+  }
+ ]
+}

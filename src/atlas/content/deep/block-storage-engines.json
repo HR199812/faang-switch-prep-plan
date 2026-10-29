@@ -1,0 +1,208 @@
+{
+ "minutes": 16,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Why the storage engine matters",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Two databases with the same API can behave completely differently under load because of how they lay data out on disk. Write-heavy event streams, read-heavy relational lookups and analytical scans each favour a different engine. Knowing B-trees, LSM-trees and columnar layouts lets you justify choices like \"Cassandra for messages, Postgres for accounts, ClickHouse for analytics\"."
+    }
+   ]
+  },
+  {
+   "id": "btree",
+   "title": "B-trees: update in place",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "A B-tree stores sorted keys in fixed-size pages (typically 8–16 KB) arranged as a shallow, wide tree. A lookup reads one page per level — 3 or 4 pages for billions of rows, most of them cached. Writes find the leaf page and modify it in place; if the page is full it splits. To survive crashes mid-update, every change is first appended to the write-ahead log."
+    },
+    {
+     "t": "list",
+     "items": [
+      "Strengths: predictable reads, efficient range scans, mature transactional engines (Postgres, MySQL InnoDB, SQL Server).",
+      "Weaknesses: random I/O for writes, page splits and fragmentation, write amplification (WAL + page writes)."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "lsm",
+   "title": "LSM-trees: append and merge later",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Client",
+      "Memtable",
+      "Commit log",
+      "SSTables on disk"
+     ],
+     "steps": [
+      {
+       "from": "Client",
+       "to": "Commit log",
+       "label": "append (sequential)",
+       "note": "durability"
+      },
+      {
+       "from": "Client",
+       "to": "Memtable",
+       "label": "insert into sorted map"
+      },
+      {
+       "from": "Memtable",
+       "to": "SSTables on disk",
+       "label": "flush when full → new immutable SSTable"
+      },
+      {
+       "from": "SSTables on disk",
+       "to": "SSTables on disk",
+       "label": "compaction: merge, drop old versions"
+      },
+      {
+       "from": "Client",
+       "to": "Memtable",
+       "label": "read: check memtable first"
+      },
+      {
+       "from": "Client",
+       "to": "SSTables on disk",
+       "label": "then newest → oldest SSTable",
+       "note": "Bloom filters skip most files"
+      }
+     ],
+     "caption": "LSM write and read paths"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Strengths: very high write throughput (sequential I/O only), good compression, natural for time-ordered and append-heavy data (Cassandra, RocksDB, ScyllaDB, LevelDB, Bigtable).",
+      "Weaknesses: reads may consult several files; compaction consumes I/O and can cause latency spikes; deletes are tombstones."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "compaction",
+   "title": "Compaction strategies",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Size-tiered",
+       "pros": [
+        "Low write amplification; good for write-heavy loads"
+       ],
+       "cons": [
+        "More SSTables per read; temporary 2× disk during compaction"
+       ]
+      },
+      {
+       "title": "Leveled",
+       "pros": [
+        "Each level has non-overlapping key ranges → fewer files per read",
+        "Predictable read latency"
+       ],
+       "cons": [
+        "Higher write amplification"
+       ]
+      },
+      {
+       "title": "Time-window",
+       "pros": [
+        "Great for TTL'd time-series: whole files expire"
+       ],
+       "cons": [
+        "Only suits time-ordered data"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "columnar",
+   "title": "Columnar storage for analytics",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Row layout (OLTP)",
+      "Column layout (OLAP)"
+     ],
+     "rows": [
+      [
+       "[id=1, country=IN, amount=20] [id=2, country=US, amount=35] …",
+       "id: [1, 2, …]  country: [IN, US, …]  amount: [20, 35, …]"
+      ]
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "An analytical query (`SUM(amount) WHERE country = 'IN'`) reads only two columns instead of whole rows.",
+      "Similar values sit together, so compression (dictionary, run-length, delta) is excellent — often 5–10×.",
+      "Engines process column chunks with vectorised (SIMD) execution.",
+      "Formats and engines: Parquet, ORC, ClickHouse, BigQuery, Snowflake, Redshift, Druid, Pinot."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ts",
+   "title": "Time-series engines",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Time-series databases (Prometheus TSDB, InfluxDB, TimescaleDB) combine ideas: an in-memory head block with a WAL (LSM-like), immutable compressed blocks per time range, columnar-style compression of timestamps (delta-of-delta) and values (XOR, Gorilla), and retention by dropping whole blocks."
+    }
+   ]
+  },
+  {
+   "id": "choose",
+   "title": "Choosing",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Workload",
+      "Engine family",
+      "Example"
+     ],
+     "rows": [
+      [
+       "Transactions, joins, read-heavy",
+       "B-tree",
+       "Postgres, MySQL"
+      ],
+      [
+       "Massive writes, key lookups, time-ordered rows",
+       "LSM",
+       "Cassandra, DynamoDB, RocksDB"
+      ],
+      [
+       "Aggregations over billions of rows",
+       "Columnar",
+       "ClickHouse, BigQuery"
+      ],
+      [
+       "Metrics with retention",
+       "TSDB",
+       "Prometheus, TimescaleDB"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Messages are append-heavy and read by (channel, time), so an LSM-based wide-column store fits; account balances need transactions, so they stay in Postgres; analytics go to a columnar warehouse fed by CDC."
+    }
+   ]
+  }
+ ]
+}

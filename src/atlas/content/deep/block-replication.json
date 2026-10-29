@@ -1,0 +1,248 @@
+{
+ "minutes": 13,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Why replicate",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Availability:** if a node dies, another has the data.",
+      "**Read scaling:** spread reads across replicas.",
+      "**Latency:** put replicas near users in other regions.",
+      "**Durability:** survive disk or machine loss."
+     ]
+    },
+    {
+     "t": "p",
+     "text": "The fundamental tension: the moment you have more than one copy, you must decide what happens when copies disagree — and how long a write waits for other copies before it's acknowledged."
+    }
+   ]
+  },
+  {
+   "id": "leader",
+   "title": "Single-leader replication",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Writers",
+        "kind": "client"
+       },
+       {
+        "label": "Readers",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "Leader",
+        "kind": "db",
+        "sub": "accepts writes"
+       }
+      ],
+      [
+       {
+        "label": "Follower 1",
+        "kind": "db",
+        "sub": "same region"
+       },
+       {
+        "label": "Follower 2",
+        "kind": "db",
+        "sub": "other region"
+       }
+      ]
+     ],
+     "caption": "Writes go to the leader; followers apply its log"
+    },
+    {
+     "t": "p",
+     "text": "The leader appends every change to its write-ahead log (or binlog) and streams it to followers, which apply it in the same order. This is how Postgres, MySQL, MongoDB replica sets and most managed databases work."
+    }
+   ]
+  },
+  {
+   "id": "sync",
+   "title": "Synchronous vs asynchronous",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Client",
+      "Leader",
+      "Sync follower",
+      "Async follower"
+     ],
+     "steps": [
+      {
+       "from": "Client",
+       "to": "Leader",
+       "label": "COMMIT"
+      },
+      {
+       "from": "Leader",
+       "to": "Sync follower",
+       "label": "WAL record"
+      },
+      {
+       "from": "Leader",
+       "to": "Async follower",
+       "label": "WAL record",
+       "note": "not waited for"
+      },
+      {
+       "from": "Sync follower",
+       "to": "Leader",
+       "label": "ack (flushed)",
+       "dashed": true
+      },
+      {
+       "from": "Leader",
+       "to": "Client",
+       "label": "committed",
+       "note": "durable on 2 nodes",
+       "dashed": true
+      }
+     ],
+     "caption": "Semi-synchronous commit"
+    },
+    {
+     "t": "table",
+     "head": [
+      "Mode",
+      "Write latency",
+      "Data loss on leader failure"
+     ],
+     "rows": [
+      [
+       "Async",
+       "Lowest",
+       "Last few writes may be lost"
+      ],
+      [
+       "Semi-sync (1 sync follower)",
+       "+1 round trip",
+       "None if the sync follower survives"
+      ],
+      [
+       "Fully sync (all followers)",
+       "Slowest; one slow follower blocks writes",
+       "None"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "lag",
+   "title": "Replication lag and the anomalies it causes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Anomaly",
+      "Example",
+      "Fix"
+     ],
+     "rows": [
+      [
+       "Read-your-writes",
+       "User edits profile, reloads, sees the old value from a lagging replica",
+       "Read own data from the leader for a few seconds after writing, or track the write's LSN"
+      ],
+      [
+       "Monotonic reads",
+       "Refreshing alternates between replicas — data appears then disappears",
+       "Pin a user's reads to one replica"
+      ],
+      [
+       "Consistent prefix",
+       "A reply appears before the question it answers",
+       "Keep causally related writes in one partition / order"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Lag is usually milliseconds, but under load or after a failover it can be seconds or minutes. Design for the worst case on any path where staleness matters."
+    }
+   ]
+  },
+  {
+   "id": "failover",
+   "title": "Failover",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Detect",
+       "text": "Leader misses heartbeats (timeout ~10–30 s)."
+      },
+      {
+       "title": "Elect",
+       "text": "Choose the most up-to-date follower (via consensus or an orchestrator)."
+      },
+      {
+       "title": "Reconfigure",
+       "text": "Point clients/proxies at the new leader."
+      },
+      {
+       "title": "Fence",
+       "text": "Make sure the old leader can't accept writes if it comes back (split brain)."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "Automatic failover with async replication can silently lose the last acknowledged writes — and if those writes generated IDs used elsewhere (e.g. in a cache), you get inconsistencies. Say which you prefer: brief unavailability or possible loss."
+    }
+   ]
+  },
+  {
+   "id": "multi",
+   "title": "Multi-leader and leaderless",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Multi-leader",
+       "pros": [
+        "Writes in every region with local latency",
+        "Survives region loss"
+       ],
+       "cons": [
+        "Write conflicts — needs LWW, CRDTs or custom merge"
+       ]
+      },
+      {
+       "title": "Leaderless (Dynamo-style)",
+       "pros": [
+        "Any replica accepts writes; quorum reads/writes",
+        "No failover step"
+       ],
+       "cons": [
+        "Eventual consistency; read repair and anti-entropy needed"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd use single-leader replication with one synchronous follower for durability, asynchronous read replicas for scale, and route a user's reads to the leader right after they write."
+    }
+   ]
+  }
+ ]
+}

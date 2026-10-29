@@ -1,0 +1,258 @@
+{
+ "minutes": 16,
+ "sections": [
+  {
+   "id": "why",
+   "title": "Why stream processing",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Batch jobs answer \"what happened yesterday?\". Many products need \"what's happening now\": fraud scoring within a second of a transaction, live dashboards, trending topics, surge pricing, alerting. Stream processors (Flink, Kafka Streams, Spark Structured Streaming, Beam/Dataflow) run continuous queries over unbounded event streams, keeping state and producing results incrementally."
+    }
+   ]
+  },
+  {
+   "id": "arch",
+   "title": "A typical streaming pipeline",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Apps / devices",
+        "kind": "client"
+       },
+       {
+        "label": "Databases (via CDC)",
+        "kind": "db"
+       }
+      ],
+      [
+       {
+        "label": "Kafka topics",
+        "kind": "queue",
+        "sub": "partitioned by key"
+       }
+      ],
+      [
+       {
+        "label": "Stream processor",
+        "kind": "service",
+        "sub": "keyed state + windows"
+       },
+       {
+        "label": "State backend",
+        "kind": "store",
+        "sub": "RocksDB + checkpoints to S3"
+       }
+      ],
+      [
+       {
+        "label": "Serving store",
+        "kind": "db",
+        "sub": "OLAP / KV"
+       },
+       {
+        "label": "Alerts / downstream topics",
+        "kind": "queue"
+       },
+       {
+        "label": "Data lake",
+        "kind": "store"
+       }
+      ]
+     ],
+     "caption": "Events in, aggregates out"
+    }
+   ]
+  },
+  {
+   "id": "time",
+   "title": "Event time, windows and watermarks",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Events arrive late and out of order: a phone loses signal and uploads ten minutes of events at once. If you bucket by **processing time** (when the event reached you), those events land in the wrong minute. Bucket by **event time** (the timestamp in the event) — then you need a rule for when a window is complete. That's the **watermark**: a moving estimate of \"we've now seen all events up to time T\"."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Window",
+      "Shape",
+      "Example"
+     ],
+     "rows": [
+      [
+       "Tumbling",
+       "Fixed, non-overlapping (12:00–12:01, 12:01–12:02)",
+       "Clicks per ad per minute"
+      ],
+      [
+       "Sliding / hopping",
+       "Fixed length, overlapping (last 5 min, every 1 min)",
+       "Moving averages, rate alerts"
+      ],
+      [
+       "Session",
+       "Gap-based: closes after N minutes of inactivity",
+       "User sessions, engagement"
+      ]
+     ]
+    },
+    {
+     "t": "seq",
+     "actors": [
+      "Source",
+      "Window 12:00–12:01",
+      "Watermark",
+      "Sink"
+     ],
+     "steps": [
+      {
+       "from": "Source",
+       "to": "Window 12:00–12:01",
+       "label": "event t=12:00:40"
+      },
+      {
+       "from": "Source",
+       "to": "Watermark",
+       "label": "events up to 12:01:05 seen",
+       "note": "max seen − 5 s allowed lateness"
+      },
+      {
+       "from": "Watermark",
+       "to": "Window 12:00–12:01",
+       "label": "watermark passes 12:01 → fire"
+      },
+      {
+       "from": "Window 12:00–12:01",
+       "to": "Sink",
+       "label": "count = 1,203"
+      },
+      {
+       "from": "Source",
+       "to": "Window 12:00–12:01",
+       "label": "late event t=12:00:58",
+       "note": "after the window fired"
+      },
+      {
+       "from": "Window 12:00–12:01",
+       "to": "Sink",
+       "label": "update (1,204) or side output",
+       "note": "allowed lateness policy",
+       "dashed": true
+      }
+     ],
+     "caption": "A late event and the watermark"
+    }
+   ]
+  },
+  {
+   "id": "state",
+   "title": "State, checkpoints and exactly-once",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Keyed state",
+       "text": "Each operator instance holds state for its key range (counts, join buffers) in local RocksDB — fast, no network calls."
+      },
+      {
+       "title": "Checkpoint",
+       "text": "Periodically (e.g. every 10 s), barriers flow through the graph and every operator snapshots its state to durable storage, aligned with the source offsets."
+      },
+      {
+       "title": "Failure",
+       "text": "Restart from the last checkpoint: restore state and rewind Kafka offsets to the checkpointed positions."
+      },
+      {
+       "title": "Output",
+       "text": "Make the sink transactional (two-phase commit tied to checkpoints) or idempotent (upsert by deterministic key) so replays don't double-write."
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "\"Exactly-once\" in streaming means exactly-once *effect on state and output*, not that each event is physically processed once. Replays happen; idempotent or transactional sinks hide them."
+    }
+   ]
+  },
+  {
+   "id": "cdc",
+   "title": "Change Data Capture",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "App",
+      "Postgres",
+      "Debezium",
+      "Kafka",
+      "Consumers"
+     ],
+     "steps": [
+      {
+       "from": "App",
+       "to": "Postgres",
+       "label": "UPDATE products SET price = 9"
+      },
+      {
+       "from": "Postgres",
+       "to": "Debezium",
+       "label": "WAL change via logical replication slot"
+      },
+      {
+       "from": "Debezium",
+       "to": "Kafka",
+       "label": "products.changes {before, after, op: u}"
+      },
+      {
+       "from": "Kafka",
+       "to": "Consumers",
+       "label": "search indexer, cache invalidator, warehouse loader"
+      }
+     ],
+     "caption": "CDC from Postgres to everything else"
+    },
+    {
+     "t": "list",
+     "items": [
+      "No dual writes: the database's own log is the source, so every committed change is captured exactly in commit order.",
+      "Consumers can be added later and backfilled from a snapshot + the log.",
+      "Watch replication-slot lag: a stalled consumer makes Postgres retain WAL and fill the disk."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "joins",
+   "title": "Joins and enrichment",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "**Stream–table join:** enrich each click with ad metadata held as a changelog-backed table in state (or a cached lookup).",
+      "**Stream–stream join:** match impressions with clicks within a time window; both sides buffered in state for the window.",
+      "Repartition (shuffle) by the join key first so matching events meet on the same instance."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "interview",
+   "title": "In an interview",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Events land in Kafka keyed by ad id; Flink aggregates them in one-minute event-time windows with a short allowed lateness, checkpoints state every few seconds, and upserts results by (ad id, minute) into the OLAP store, so a replay can't double count. Database changes reach search and the warehouse through Debezium CDC."
+    }
+   ]
+  }
+ ]
+}

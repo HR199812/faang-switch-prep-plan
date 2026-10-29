@@ -1,0 +1,406 @@
+{
+ "id": "amazon-s3",
+ "num": 7,
+ "title": "Amazon S3",
+ "summary": "Object storage: a metadata service maps bucket/key to placements, data nodes store erasure-coded chunks, and the system delivers eleven nines of durability with strong read-after-write consistency.",
+ "tags": [
+  "Blob storage",
+  "Erasure coding",
+  "Metadata",
+  "Durability"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "blob",
+  "replication",
+  "sharding",
+  "consistency"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "PUT / GET / DELETE / LIST objects in buckets; objects up to 5 TB"
+      ],
+      [
+       "Functional",
+       "Multipart upload; versioning; presigned URLs; lifecycle policies"
+      ],
+      [
+       "Non-functional",
+       "Durability 99.999999999% (11 nines); availability 99.99%"
+      ],
+      [
+       "Non-functional",
+       "Strong read-after-write and list consistency (S3 since Dec 2020)"
+      ],
+      [
+       "Non-functional",
+       "Exabytes of data; millions of requests/s"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Objects",
+       "value": "~400T",
+       "sub": "trillions of keys"
+      },
+      {
+       "label": "Requests",
+       "value": "~100M/s",
+       "sub": "peak, across regions"
+      },
+      {
+       "label": "Avg object",
+       "value": "~100 KB",
+       "sub": "huge variance"
+      },
+      {
+       "label": "EC overhead",
+       "value": "~1.4×",
+       "sub": "vs 3× for replication"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "At exabyte scale, replication's 3× storage cost is the dominant expense, so erasure coding is the default for durability."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "PUT    /{bucket}/{key}                 body = bytes       -> 200 ETag\nGET    /{bucket}/{key}   Range: bytes=…                     -> 200 / 206\nPOST   /{bucket}/{key}?uploads                             -> UploadId\nPUT    /{bucket}/{key}?partNumber=N&uploadId=…            -> ETag (5 MB–5 GB parts)\nPOST   /{bucket}/{key}?uploadId=…  (complete)\nGET    /{bucket}?list-type=2&prefix=logs/&continuation-token=…"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Layer",
+      "Holds",
+      "Shape"
+     ],
+     "rows": [
+      [
+       "Metadata index",
+       "bucket + key (+ version) → size, ETag, ACL, chunk placements",
+       "Distributed sorted KV, partitioned by key range"
+      ],
+      [
+       "Placement / cluster map",
+       "Which storage nodes hold which chunk groups",
+       "Small, replicated, cached"
+      ],
+      [
+       "Storage nodes",
+       "Erasure-coded chunks on disks",
+       "Append-oriented local store (ShardStore at AWS)"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Keys are a flat namespace; `/` is just a character. LIST with a prefix is a range scan on the sorted metadata index."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Client / SDK",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "DNS + LB",
+        "kind": "edge"
+       },
+       {
+        "label": "Front-end API",
+        "kind": "service",
+        "sub": "auth, routing"
+       }
+      ],
+      [
+       {
+        "label": "Metadata service",
+        "kind": "db",
+        "sub": "sorted, partitioned"
+       },
+       {
+        "label": "Placement service",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Storage nodes AZ-a",
+        "kind": "store"
+       },
+       {
+        "label": "Storage nodes AZ-b",
+        "kind": "store"
+       },
+       {
+        "label": "Storage nodes AZ-c",
+        "kind": "store"
+       }
+      ]
+     ],
+     "caption": "Front end streams bytes to storage nodes, then commits metadata"
+    },
+    {
+     "t": "list",
+     "items": [
+      "**PUT:** front end authenticates, splits the object into chunks, erasure-codes them (e.g. 6 data + 3 parity), writes shards to nodes across 3 AZs.",
+      "When enough shards are durable, it commits the metadata record (new version) → 200 OK.",
+      "**GET:** look up metadata → read any 6 of the 9 shards in parallel → reconstruct → stream to client."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "durability",
+   "title": "Deep dive: durability",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Erasure coding k data + m parity: survives any m shard losses at (k+m)/k storage; spread shards across AZs and failure domains.",
+      "Checksums on every chunk, end to end; background scrubbers re-read data and repair silent corruption.",
+      "Repair speed matters as much as redundancy: durability = probability that m+1 failures happen before repair finishes.",
+      "Deletes are soft for a period; versioning protects against overwrite mistakes."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key idea",
+     "text": "Durability is a race between failure and repair. More parity buys time; faster, parallel repair shrinks the window."
+    }
+   ]
+  },
+  {
+   "id": "consistency",
+   "title": "Deep dive: strong consistency",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Metadata is the commit point: an object is visible only once its metadata record is written.",
+      "S3 made reads strongly consistent by adding a replicated, consistent witness/cache layer that tracks the latest version per key, so caches never serve stale metadata.",
+      "Concurrent PUTs to one key: last writer (by commit order) wins; use versioning or conditional writes (`If-None-Match`) to detect it."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Listing millions of keys under a single hot prefix can overload one metadata partition. Partitions split automatically, but spreading key prefixes still helps request rate."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Disk / node dies",
+       "Shards missing",
+       "Reconstruct from remaining shards; parallel repair across many nodes"
+      ],
+      [
+       "AZ outage",
+       "One third of shards gone",
+       "6-of-9 across 3 AZs still readable"
+      ],
+      [
+       "Hot prefix",
+       "Throttling (503 Slow Down)",
+       "Auto-split partitions, client backoff"
+      ],
+      [
+       "Half-finished multipart",
+       "Orphan parts",
+       "Lifecycle rule to abort incomplete uploads"
+      ],
+      [
+       "Bit rot",
+       "Silent corruption",
+       "Checksums + scrubbing"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Redundancy",
+       "Erasure coding",
+       "Small objects cost more CPU; reads touch several nodes"
+      ],
+      [
+       "Namespace",
+       "Flat keys",
+       "Real directories / rename"
+      ],
+      [
+       "Consistency",
+       "Strong",
+       "Extra metadata coordination"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "PUT/GET/LIST, multipart, versioning."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "11 nines, 99.99%, strong consistency."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "Exabytes; EC 1.4× vs 3×."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "REST API; metadata index vs data nodes."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Front end, metadata, placement, storage nodes across AZs."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Erasure coding + repair, metadata commit, multipart."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Hot prefixes, scrubbing, lifecycle tiers."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "Small objects and erasure coding?",
+       "a": "Pack many small objects into larger chunks/extents before coding, keep an index of offsets."
+      },
+      {
+       "q": "How do presigned URLs work?",
+       "a": "The SDK signs method + key + expiry with the user's secret (SigV4); the front end verifies the signature, no session needed."
+      },
+      {
+       "q": "How do storage classes work?",
+       "a": "Same metadata, different placement: fewer AZs, colder media, or Glacier tape/deep storage with retrieval delay."
+      },
+      {
+       "q": "How does rename work?",
+       "a": "It doesn't natively: copy + delete, which is why flat keys plus prefixes are used."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Metadata index (sorted KV) + data nodes (erasure-coded shards).",
+      "EC k+m: survive m losses at (k+m)/k cost.",
+      "Shards spread across 3 AZs.",
+      "Metadata write = commit point → strong consistency.",
+      "Multipart for big uploads; presigned URLs for direct access.",
+      "Durability = redundancy + fast repair + checksums."
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,224 @@
+{
+ "minutes": 15,
+ "sections": [
+  {
+   "id": "dual-write",
+   "title": "The dual-write problem",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "A service updates its database and also needs to tell the world (publish an event to Kafka, update a search index, call another service). Doing both in application code is a **dual write**, and it's broken: if the DB commit succeeds and the publish fails (or the process crashes between them), the systems disagree forever. Reversing the order just flips which side is wrong."
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Common mistake",
+     "text": "\"Commit, then publish\" or \"publish, then commit\" in a request handler. Both lose data on a crash at the wrong moment."
+    }
+   ]
+  },
+  {
+   "id": "outbox",
+   "title": "Transactional outbox",
+   "blocks": [
+    {
+     "t": "seq",
+     "actors": [
+      "Order service",
+      "Orders DB",
+      "Outbox relay",
+      "Kafka"
+     ],
+     "steps": [
+      {
+       "from": "Order service",
+       "to": "Orders DB",
+       "label": "BEGIN; INSERT order; INSERT outbox(event)",
+       "note": "same transaction"
+      },
+      {
+       "from": "Orders DB",
+       "to": "Order service",
+       "label": "COMMIT",
+       "note": "both or neither",
+       "dashed": true
+      },
+      {
+       "from": "Outbox relay",
+       "to": "Orders DB",
+       "label": "poll / tail WAL (CDC)"
+      },
+      {
+       "from": "Outbox relay",
+       "to": "Kafka",
+       "label": "publish OrderCreated"
+      },
+      {
+       "from": "Kafka",
+       "to": "Outbox relay",
+       "label": "ack",
+       "dashed": true
+      },
+      {
+       "from": "Outbox relay",
+       "to": "Orders DB",
+       "label": "mark sent / delete"
+      }
+     ],
+     "caption": "Write state and the event in one local transaction; relay later"
+    },
+    {
+     "t": "list",
+     "items": [
+      "The event is durable the instant the order is — atomicity comes from the local DB transaction.",
+      "The relay may publish twice (crash after publish, before marking sent), so delivery is at-least-once and consumers must be idempotent.",
+      "Implement the relay with Debezium (CDC on the outbox table) or a simple poller."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "saga",
+   "title": "Sagas: transactions across services",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "When a business process spans services (order → payment → inventory → shipping), a distributed ACID transaction would lock resources across the network. A saga instead runs a sequence of **local transactions**, each publishing an event or command; if a later step fails, previously completed steps are undone by **compensating transactions**."
+    },
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Create order (PENDING)",
+       "text": "Compensate: cancel order"
+      },
+      {
+       "title": "Authorise payment",
+       "text": "Compensate: void authorisation / refund"
+      },
+      {
+       "title": "Reserve inventory",
+       "text": "Compensate: release reservation"
+      },
+      {
+       "title": "Confirm order",
+       "text": "No compensation needed — final step"
+      }
+     ]
+    },
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Choreography (events)",
+       "pros": [
+        "No central coordinator; services react to events"
+       ],
+       "cons": [
+        "The flow is implicit and hard to follow; cyclic dependencies"
+       ]
+      },
+      {
+       "title": "Orchestration (a coordinator)",
+       "pros": [
+        "Flow is explicit in one place; easier to monitor",
+        "Fits workflow engines (Temporal, Step Functions)"
+       ],
+       "cons": [
+        "Coordinator is another service to run"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "key",
+     "title": "Key insight",
+     "text": "Sagas give atomicity eventually, but not isolation: other transactions can see intermediate states (an order that's PENDING). Use semantic locks — statuses like PENDING — and design compensations as business operations (refund), not database rollbacks."
+    }
+   ]
+  },
+  {
+   "id": "cqrs",
+   "title": "CQRS",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Commands",
+        "kind": "client",
+        "sub": "place order"
+       },
+       {
+        "label": "Queries",
+        "kind": "client",
+        "sub": "order history page"
+       }
+      ],
+      [
+       {
+        "label": "Write service",
+        "kind": "service",
+        "sub": "validates, normalised DB"
+       },
+       {
+        "label": "Read service",
+        "kind": "service",
+        "sub": "denormalised views"
+       }
+      ],
+      [
+       {
+        "label": "Write DB",
+        "kind": "db",
+        "sub": "source of truth"
+       },
+       {
+        "label": "Event stream",
+        "kind": "queue"
+       },
+       {
+        "label": "Read stores",
+        "kind": "db",
+        "sub": "Elasticsearch, Redis, materialised views"
+       }
+      ]
+     ],
+     "caption": "Separate write model and read models"
+    },
+    {
+     "t": "p",
+     "text": "Command Query Responsibility Segregation splits the model used to change data from the models used to read it. Writes go to a normalised store; events update one or more read-optimised projections (a search index, a per-user feed, a reporting table). It shines when read and write shapes differ wildly — at the cost of eventual consistency between the two sides."
+    }
+   ]
+  },
+  {
+   "id": "es",
+   "title": "Event sourcing",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Instead of storing current state, store the append-only sequence of events (`ItemAdded`, `ItemRemoved`, `CheckedOut`); current state is a fold over them.",
+      "Gives a full audit trail, time travel and the ability to build new projections by replaying.",
+      "Costs: schema evolution of events, replay time (use snapshots), and a steeper learning curve. Use it where history is the product (ledgers, collaboration), not everywhere."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "interview",
+   "title": "In an interview",
+   "blocks": [
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd write the order and an OrderCreated outbox row in one transaction, relay it to Kafka via CDC, and drive payment and inventory as an orchestrated saga with compensations. Consumers are idempotent because the relay is at-least-once."
+    }
+   ]
+  }
+ ]
+}

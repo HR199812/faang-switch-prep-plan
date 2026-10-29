@@ -1,0 +1,533 @@
+{
+ "id": "url-shortener",
+ "num": 1,
+ "title": "URL Shortener",
+ "summary": "A read-heavy key-value lookup: generate collision-free short codes, serve redirects from cache in under 10 ms, and count clicks asynchronously.",
+ "tags": [
+  "IDs",
+  "Caching",
+  "KV store",
+  "Analytics"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "ids",
+  "caching",
+  "databases",
+  "sharding",
+  "rate-limiting"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Create a short URL from a long URL; optional custom alias and expiry"
+      ],
+      [
+       "Functional",
+       "Redirect `/{code}` to the long URL"
+      ],
+      [
+       "Functional",
+       "Click analytics per link (count, country, referrer, time)"
+      ],
+      [
+       "Non-functional",
+       "Redirect p99 < 50 ms globally; 99.99% availability on the redirect path"
+      ],
+      [
+       "Non-functional",
+       "Codes never collide and are not trivially guessable"
+      ],
+      [
+       "Non-functional",
+       "Read:write ≈ 100:1"
+      ]
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Out of scope: user accounts UI, link-in-bio pages, malware scanning (mention as follow-up)."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "New links / day",
+       "value": "100M",
+       "sub": "≈ 1,200 writes/s"
+      },
+      {
+       "label": "Redirects / day",
+       "value": "10B",
+       "sub": "≈ 115k reads/s, ~350k peak"
+      },
+      {
+       "label": "Storage / 5 yrs",
+       "value": "≈ 90 TB",
+       "sub": "500 B × 182B rows"
+      },
+      {
+       "label": "Code length",
+       "value": "7 chars",
+       "sub": "62^7 ≈ 3.5 trillion"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "It's 100:1 read-heavy, so the redirect path lives in cache. 1,200 writes per second is modest; the hard parts are unique code generation and serving 350k redirects a second at the edge."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/urls        { longUrl, alias?, expiresAt? }   -> 201 { code, shortUrl }\n     Idempotency-Key: <uuid>\nGET  /{code}                                             -> 302 Location: <longUrl>   (404 / 410 if expired)\nGET  /v1/urls/{code}/stats?from&to&groupBy=day|country   -> { clicks, series[] }\nDELETE /v1/urls/{code}                                   -> 204"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Table",
+      "Key",
+      "Fields",
+      "Store"
+     ],
+     "rows": [
+      [
+       "urls",
+       "code (PK)",
+       "long_url, owner_id, created_at, expires_at",
+       "DynamoDB / Cassandra (KV, horizontally partitioned by code)"
+      ],
+      [
+       "users_urls",
+       "owner_id + created_at",
+       "code",
+       "Same store, secondary access pattern"
+      ],
+      [
+       "clicks",
+       "code + time bucket",
+       "count, country, referrer",
+       "ClickHouse / Druid (columnar analytics)"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "The only hot query is `code → long_url`, a single-key lookup with no joins, so a partitioned KV store fits. Sharding by code spreads load evenly because codes are effectively random."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Browser",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "CDN / edge",
+        "kind": "edge",
+        "sub": "caches 301s, rate limits"
+       }
+      ],
+      [
+       {
+        "label": "Redirect service",
+        "kind": "service",
+        "sub": "stateless"
+       },
+       {
+        "label": "Create service",
+        "kind": "service",
+        "sub": "auth, validation"
+       }
+      ],
+      [
+       {
+        "label": "Redis cluster",
+        "kind": "cache",
+        "sub": "code → url"
+       },
+       {
+        "label": "ID range allocator",
+        "kind": "service",
+        "sub": "blocks of 1,000"
+       }
+      ],
+      [
+       {
+        "label": "KV store",
+        "kind": "db",
+        "sub": "urls"
+       },
+       {
+        "label": "Kafka",
+        "kind": "queue",
+        "sub": "click events"
+       }
+      ],
+      [
+       {
+        "label": "ClickHouse",
+        "kind": "db",
+        "sub": "analytics"
+       }
+      ]
+     ],
+     "caption": "Redirect path served from edge and cache; writes go through ID allocation"
+    },
+    {
+     "t": "list",
+     "items": [
+      "**Write:** create service takes the next ID from its locally held range, base62-encodes it, writes `code → url` to the KV store, returns the short URL.",
+      "**Read:** CDN miss → redirect service checks Redis → on miss reads KV, fills Redis (TTL 24 h) → returns 302 and emits a click event to Kafka without waiting."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "ids",
+   "title": "Deep dive: generating codes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Approach",
+      "Collisions",
+      "Coordination",
+      "Verdict"
+     ],
+     "rows": [
+      [
+       "Hash (MD5) of URL, take 7 chars",
+       "Yes (birthday bound) → check + retry",
+       "None",
+       "Extra DB read per write"
+      ],
+      [
+       "Random 7 chars",
+       "Yes as table grows",
+       "None",
+       "Same retry cost"
+      ],
+      [
+       "Global counter + base62",
+       "None",
+       "Every write hits counter",
+       "Counter is a bottleneck"
+      ],
+      [
+       "Range allocation + base62",
+       "None",
+       "One call per 1,000 IDs",
+       "Chosen"
+      ],
+      [
+       "Snowflake → base62",
+       "None",
+       "Machine ID only",
+       "Good, but 11 chars"
+      ]
+     ]
+    },
+    {
+     "t": "code",
+     "lang": "python",
+     "text": "ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'\ndef base62(n):\n    s = ''\n    while n:\n        n, r = divmod(n, 62)\n        s = ALPHABET[r] + s\n    return s.rjust(7, '0')"
+    },
+    {
+     "t": "callout",
+     "tone": "tip",
+     "title": "Tip",
+     "text": "Sequential IDs make codes guessable. Pass the ID through a reversible permutation (e.g. multiply by a large odd number mod 62^7, or a Feistel cipher) before encoding."
+    },
+    {
+     "t": "p",
+     "text": "Custom aliases are inserted with a conditional write (`attribute_not_exists(code)`) so two users can't claim the same alias."
+    }
+   ]
+  },
+  {
+   "id": "redirects",
+   "title": "Deep dive: 301 vs 302 and caching",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "301 Moved Permanently",
+       "pros": [
+        "Browsers and CDNs cache it",
+        "Lowest latency, least load"
+       ],
+       "cons": [
+        "Later clicks bypass you → analytics lost",
+        "Can't change destination"
+       ]
+      },
+      {
+       "title": "302 Found",
+       "pros": [
+        "Every click reaches you → full analytics",
+        "Destination can change or expire"
+       ],
+       "cons": [
+        "More load; must be fast"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "I'd return 302 so we keep analytics and can expire links, and get the speed back with a short edge cache (30–60 s) plus Redis. The hot set is small: the top 20% of codes serve about 80% of clicks."
+    },
+    {
+     "t": "p",
+     "text": "Cache sizing: 115k reads/s, ~20% of daily distinct codes are hot. If 1B distinct codes are hit per day, 200M × 500 B ≈ 100 GB of Redis across a cluster."
+    }
+   ]
+  },
+  {
+   "id": "analytics",
+   "title": "Deep dive: click analytics",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Redirect never waits on analytics: publish `{code, ts, ip, ua, referrer}` to Kafka and return.",
+      "Stream processor (Flink) enriches with geo-IP, aggregates per code per minute, writes to ClickHouse.",
+      "Exact per-click rows go to cheap object storage for reprocessing.",
+      "Dashboards read pre-aggregated rollups; counts are eventually consistent (seconds)."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Counting with `UPDATE urls SET clicks = clicks + 1` on every redirect turns a read path into a hot-row write path. Never do this."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Redis node down",
+       "Cache misses spike to KV",
+       "Replicas + client-side retry on replica; KV autoscaling; request coalescing"
+      ],
+      [
+       "Viral link (hot key)",
+       "One Redis shard overloaded",
+       "Edge cache + in-process LRU on redirect servers"
+      ],
+      [
+       "ID allocator down",
+       "No new links",
+       "Servers hold a buffer of 2 ranges; allocator runs as leader with standby (etcd lease)"
+      ],
+      [
+       "Abuse / spam links",
+       "Domain blocklisted",
+       "Rate limit creates per user/IP, Safe Browsing check async, takedown flag"
+      ],
+      [
+       "Region outage",
+       "Redirects fail",
+       "Multi-region active-active reads; KV global tables; GeoDNS failover"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Store",
+       "Partitioned KV",
+       "Ad-hoc SQL queries over links"
+      ],
+      [
+       "Code generation",
+       "Range allocation",
+       "A small coordination service"
+      ],
+      [
+       "Redirect code",
+       "302 + short edge cache",
+       "Some latency vs 301"
+      ],
+      [
+       "Analytics",
+       "Async via Kafka",
+       "Real-time exact counts"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Create, redirect, analytics, expiry, custom alias. Confirm 100:1 read-heavy."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "p99 < 50 ms redirects, 99.99% available, no collisions."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "1.2k writes/s, 115k reads/s, 7-char base62, ~90 TB over 5 years."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "POST /urls, GET /{code}; KV table keyed by code."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "CDN → redirect svc → Redis → KV; create svc with range allocator; Kafka for clicks."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Code generation options, 301 vs 302 + caching, analytics pipeline."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Hot keys, abuse, multi-region, monitoring redirect p99 and cache hit rate."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How do you handle the same long URL submitted twice?",
+       "a": "Either allow duplicates (simplest, per-user links have different analytics) or keep a secondary index `hash(longUrl, owner) → code` and return the existing code."
+      },
+      {
+       "q": "How do expired links get cleaned up?",
+       "a": "Store `expires_at`; the redirect path checks it (410 Gone). A TTL attribute in DynamoDB/Cassandra deletes rows lazily; invalidate the cache key on expiry."
+      },
+      {
+       "q": "Why not use a SQL database?",
+       "a": "One would work up to a point with sharding, but there are no joins or transactions; a KV store gives simpler horizontal scaling for 180B rows."
+      },
+      {
+       "q": "How would you make codes unpredictable?",
+       "a": "Permute the counter value with a keyed bijection before base62, or use random codes with conditional writes and retry."
+      },
+      {
+       "q": "What do you monitor?",
+       "a": "Redirect p50/p99, cache hit ratio (target > 95%), 4xx/5xx rate, allocator range remaining, Kafka consumer lag."
+      },
+      {
+       "q": "How do you prevent enumeration scraping?",
+       "a": "Rate limit by IP at the edge, non-sequential codes, bot detection on high 404 rates."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "100:1 reads → cache + CDN dominate the design.",
+      "7 base62 chars = 3.5 trillion codes.",
+      "Range allocation: unique codes, one coordination call per block.",
+      "302 keeps analytics; 301 is faster but blind.",
+      "Clicks go async through Kafka into a columnar store.",
+      "Shard KV by code; it's random so load is even.",
+      "Hot links: edge cache + local LRU.",
+      "Never increment a counter on the redirect row."
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,506 @@
+{
+ "id": "redis-use-cases",
+ "num": 2,
+ "title": "Redis Use Cases",
+ "summary": "One in-memory engine, many jobs: pick the right data structure for caching, sessions, rate limits, locks, leaderboards, queues and geo, and know where Redis' durability ends.",
+ "tags": [
+  "Data structures",
+  "Locks",
+  "Rate limits",
+  "Cluster"
+ ],
+ "difficulty": "Medium",
+ "related": [
+  "redis",
+  "caching",
+  "rate-limiting",
+  "transactions-locks",
+  "geospatial"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Framing: design the shared Redis platform for a large e-commerce app that serves product caching, user sessions, API rate limiting, flash-sale inventory locks, a gamified leaderboard, delayed jobs and a 'stores near me' feature."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Use case",
+      "Latency need",
+      "Durability need"
+     ],
+     "rows": [
+      [
+       "Product cache",
+       "< 1 ms",
+       "None (rebuildable)"
+      ],
+      [
+       "Sessions",
+       "< 2 ms",
+       "Survive node failure"
+      ],
+      [
+       "Rate limiting",
+       "< 1 ms",
+       "Approximate is fine"
+      ],
+      [
+       "Locks",
+       "< 2 ms",
+       "Correctness critical"
+      ],
+      [
+       "Leaderboard",
+       "< 5 ms",
+       "Rebuildable from DB"
+      ],
+      [
+       "Delayed jobs",
+       "seconds",
+       "Must not lose jobs"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Ops / s",
+       "value": "1.5M",
+       "sub": "peak, all use cases"
+      },
+      {
+       "label": "Per node",
+       "value": "~100k+",
+       "sub": "ops/s single thread"
+      },
+      {
+       "label": "Primaries",
+       "value": "16–24",
+       "sub": "with headroom"
+      },
+      {
+       "label": "Memory",
+       "value": "~400 GB",
+       "sub": "+ replicas"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "At 1.5M ops/s and ~100k per node I'd want about 20 primaries with one replica each, and I'd split use cases with different durability needs into separate clusters."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "Command patterns",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "text",
+     "text": "Cache:        GET p:42 / SETEX p:42 300 <json>\nSession:      HSET sess:<id> uid 42 cart 3 ; EXPIRE sess:<id> 1800\nRate limit:   EVAL token_bucket.lua 1 rl:{key} cap rate now\nLock:         SET lock:sku42 <uuid> NX PX 5000 ; release via Lua compare-and-delete\nInventory:    DECRBY stock:sku42 1  (reject if result < 0, then INCRBY back)\nLeaderboard:  ZINCRBY lb:week 10 u42 ; ZREVRANGE lb:week 0 99 WITHSCORES ; ZREVRANK lb:week u42\nDelayed job:  ZADD jobs <runAt> <jobId> ; Lua: ZRANGEBYSCORE jobs 0 now LIMIT 0 50 + ZREM\nStream queue: XADD orders * id 9 ; XREADGROUP GROUP g c1 COUNT 10 STREAMS orders > ; XACK\nGeo:          GEOADD stores 73.85 18.52 pune-1 ; GEOSEARCH stores FROMLONLAT .. BYRADIUS 5 km\nUniques:      PFADD uv:2026-10-29 u42 ; PFCOUNT uv:2026-10-29"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data structure choices",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Need",
+      "Structure",
+      "Why",
+      "Complexity"
+     ],
+     "rows": [
+      [
+       "Object cache",
+       "String (JSON) or Hash",
+       "Hash allows partial updates",
+       "O(1)"
+      ],
+      [
+       "Leaderboard",
+       "Sorted set",
+       "Skip list keeps order by score",
+       "O(log N)"
+      ],
+      [
+       "Unique counts",
+       "HyperLogLog",
+       "12 KB fixed, ~0.8% error",
+       "O(1)"
+      ],
+      [
+       "Daily active flags",
+       "Bitmap",
+       "1 bit per user: 100M users = 12.5 MB",
+       "O(1)"
+      ],
+      [
+       "Work queue",
+       "Stream",
+       "Consumer groups, acks, pending list",
+       "O(1) append"
+      ],
+      [
+       "Nearby",
+       "Geo (sorted set of geohashes)",
+       "Radius search",
+       "O(log N + M)"
+      ],
+      [
+       "Membership",
+       "Set",
+       "SISMEMBER, intersections",
+       "O(1)"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "API services",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Cache cluster",
+        "kind": "cache",
+        "sub": "allkeys-lfu, no persistence"
+       },
+       {
+        "label": "State cluster",
+        "kind": "cache",
+        "sub": "AOF everysec, replicas"
+       },
+       {
+        "label": "Locks",
+        "kind": "cache",
+        "sub": "or etcd"
+       }
+      ],
+      [
+       {
+        "label": "Primary DB",
+        "kind": "db",
+        "sub": "source of truth"
+       }
+      ]
+     ],
+     "caption": "Separate clusters by durability and blast radius"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Cache cluster may evict anything; state cluster (sessions, jobs, rate limits) uses `noeviction` + AOF.",
+      "Keeping them apart stops a cache stampede from evicting sessions or jobs."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cluster",
+   "title": "Deep dive: Redis Cluster internals",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "16,384 hash slots; slot = CRC16(key) mod 16384; each primary owns a range.",
+      "Clients cache the slot map; a `MOVED` reply updates it, `ASK` handles keys mid-migration.",
+      "Multi-key commands and Lua need all keys in one slot: use hash tags `{user:42}:cart`.",
+      "Failover: replicas detect primary failure by gossip, a majority of primaries vote, a replica is promoted (seconds).",
+      "Replication is async: acknowledged writes can be lost on failover. `WAIT 1 100` narrows but doesn't close the gap."
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "Hash tags concentrate keys: tagging everything with `{tenant}` puts a big tenant on one slot and one node."
+    }
+   ]
+  },
+  {
+   "id": "locks",
+   "title": "Deep dive: flash-sale inventory",
+   "blocks": [
+    {
+     "t": "compare",
+     "cols": [
+      {
+       "title": "Atomic counter (DECRBY)",
+       "pros": [
+        "One round trip, no lock",
+        "Handles 100k+ decrements/s"
+       ],
+       "cons": [
+        "Redis is not the ledger; must reconcile with DB"
+       ]
+      },
+      {
+       "title": "Distributed lock per SKU",
+       "pros": [
+        "Protects multi-step logic"
+       ],
+       "cons": [
+        "Serializes all buyers of a hot SKU",
+        "Expiry + GC pause risk"
+       ]
+      }
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Pattern: preload `stock:sku42 = 1000`. Each buy runs a Lua script: if stock > 0, decrement and push an order event to a Stream; else reject. A consumer writes orders to the DB transactionally. Nightly reconciliation compares Redis vs DB."
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "For a flash sale I'd avoid locks: an atomic Lua decrement admits exactly N buyers in memory, and the database remains the ledger via an async order stream."
+    }
+   ]
+  },
+  {
+   "id": "durability",
+   "title": "Deep dive: persistence and when not to use Redis",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Mode",
+      "Data loss on crash",
+      "Cost"
+     ],
+     "rows": [
+      [
+       "None",
+       "Everything",
+       "Fastest"
+      ],
+      [
+       "RDB every 5 min",
+       "Up to 5 minutes",
+       "Fork + copy-on-write memory spike"
+      ],
+      [
+       "AOF everysec",
+       "≤ 1 second",
+       "Small write overhead"
+      ],
+      [
+       "AOF always",
+       "~0",
+       "Much slower"
+      ]
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Rule",
+     "text": "Don't keep money, orders or anything you can't rebuild only in Redis. Use it in front of a durable store."
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Big key (10 MB hash)",
+       "Blocks the single thread, latency spikes",
+       "Split into buckets; `UNLINK` for async delete; scan for big keys"
+      ],
+      [
+       "Hot key",
+       "One node saturated",
+       "Client-side cache (Redis 6 tracking), replicas for reads, key sharding"
+      ],
+      [
+       "Memory full",
+       "Evictions or write errors",
+       "Separate clusters, maxmemory alerts at 75%"
+      ],
+      [
+       "Slow commands (KEYS, SMEMBERS on huge set)",
+       "Stalls everyone",
+       "Disable KEYS, use SCAN, slowlog alerts"
+      ],
+      [
+       "Failover write loss",
+       "Lost sessions/jobs",
+       "Idempotent jobs, Streams with re-delivery, WAIT for critical writes"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "One vs many clusters",
+       "Split by durability",
+       "More ops overhead"
+      ],
+      [
+       "Locks",
+       "Redis for efficiency, etcd for correctness",
+       "Two systems"
+      ],
+      [
+       "Queues",
+       "Redis Streams for light jobs",
+       "Kafka's retention and replay at scale"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "List the use cases and their latency/durability needs."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Sub-ms reads, which data may be lost."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "Ops/s → node count; memory per use case."
+      },
+      {
+       "min": "12–17",
+       "title": "Structures",
+       "text": "Map each use case to a data structure and command."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Separate cache vs state clusters, DB as source of truth."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Cluster slots + failover, flash-sale counter, lock safety."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Big/hot keys, persistence modes, monitoring memory and latency."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "Why is Redis fast despite being single-threaded?",
+       "a": "Everything is in memory, commands are tiny, it uses an event loop with epoll and no locks; since 6.0 network I/O can use threads while execution stays single-threaded."
+      },
+      {
+       "q": "Redlock: safe or not?",
+       "a": "Debated. It assumes bounded clock drift and pauses. Fine for efficiency; for correctness add fencing tokens or use a consensus system."
+      },
+      {
+       "q": "How would you implement a rate limiter shared across 50 gateways?",
+       "a": "Token bucket or sliding window in a Lua script on Redis, key per client, fail-open on Redis outage with local fallback limits."
+      },
+      {
+       "q": "Redis Streams vs Kafka?",
+       "a": "Streams are simple and fast but memory-bound with limited retention; Kafka is disk-based with long retention, partitions and high throughput."
+      },
+      {
+       "q": "How do you rebuild a leaderboard after data loss?",
+       "a": "Replay scores from the DB or the event log into a new key, then RENAME atomically."
+      },
+      {
+       "q": "What metrics do you watch?",
+       "a": "Ops/s, p99 latency, memory used vs maxmemory, evictions, keyspace hit ratio, replication lag, slowlog."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Single-threaded execution → every command is atomic.",
+      "Sorted set = leaderboards, sliding windows, delayed jobs.",
+      "HyperLogLog = unique counts in 12 KB.",
+      "16,384 slots; hash tags keep multi-key ops in one slot.",
+      "Async replication → failover can lose acked writes.",
+      "Lock release must compare the token (Lua).",
+      "Separate cache and state clusters.",
+      "Never the system of record for money."
+     ]
+    }
+   ]
+  }
+ ]
+}

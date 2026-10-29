@@ -1,0 +1,439 @@
+{
+ "id": "instagram",
+ "num": 16,
+ "title": "Instagram",
+ "summary": "Photo and video sharing at billions-of-users scale: direct-to-storage media uploads with async processing, a ranked feed built from a hybrid fan-out, Stories with 24-hour expiry, and sharded Postgres/Cassandra behind aggressive caching.",
+ "tags": [
+  "Media pipeline",
+  "Feed",
+  "Sharding",
+  "Stories"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "blob",
+  "cdn",
+  "caching",
+  "sharding",
+  "ids",
+  "queues-kafka"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Upload photos/videos with captions; follow users; like and comment"
+      ],
+      [
+       "Functional",
+       "Home feed (ranked), profile grid, Stories (expire after 24 h), Explore"
+      ],
+      [
+       "Functional",
+       "Notifications for likes, comments, follows"
+      ],
+      [
+       "Non-functional",
+       "Feed loads < 500 ms; media appears instantly for the uploader"
+      ],
+      [
+       "Non-functional",
+       "2B+ monthly users; heavy read skew; celebrity accounts with 600M followers"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "DAU",
+       "value": "500M",
+       "sub": ""
+      },
+      {
+       "label": "Uploads / day",
+       "value": "100M",
+       "sub": "≈ 1.2k/s, avg 2 MB → 200 TB/day"
+      },
+      {
+       "label": "Feed reads / s",
+       "value": "~1M",
+       "sub": "peak"
+      },
+      {
+       "label": "Likes / s",
+       "value": "~50k",
+       "sub": "peak"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "Media storage and delivery dominate: 200 TB a day of originals plus renditions, served through a CDN. The database side is sharded metadata and a precomputed feed."
+    }
+   ]
+  },
+  {
+   "id": "api",
+   "title": "API",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "http",
+     "text": "POST /v1/media/upload-url          { type, size }            -> { uploadUrl, mediaId }\nPOST /v1/posts                     { mediaIds[], caption, location? }\nGET  /v1/feed?cursor               -> ranked posts\nGET  /v1/stories/tray              -> users with active stories\nPOST /v1/posts/{id}/like   /   POST /v1/posts/{id}/comments"
+    }
+   ]
+  },
+  {
+   "id": "data-model",
+   "title": "Data model",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Data",
+      "Key",
+      "Store"
+     ],
+     "rows": [
+      [
+       "users, posts, comments",
+       "IDs embed logical shard (Instagram ID: 41 bits ms | 13 bits shard | 10 bits seq)",
+       "Sharded Postgres (thousands of logical shards on fewer hosts)"
+      ],
+      [
+       "follows",
+       "(follower, followee) + reverse",
+       "Graph store (TAO-like) / sharded tables"
+      ],
+      [
+       "likes",
+       "(post_id, user_id)",
+       "Cassandra; counts cached separately"
+      ],
+      [
+       "feed cache",
+       "user_id → list of post IDs",
+       "Redis / memcache"
+      ],
+      [
+       "stories",
+       "(user_id, story_id) with TTL 24 h",
+       "Cassandra with TTL + CDN media"
+      ]
+     ]
+    },
+    {
+     "t": "p",
+     "text": "Instagram's engineering blog describes generating IDs inside Postgres with PL/pgSQL so the shard is encoded in the ID — any service can route by ID without a lookup."
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Mobile app",
+        "kind": "client"
+       }
+      ],
+      [
+       {
+        "label": "CDN",
+        "kind": "edge",
+        "sub": "images, video"
+       },
+       {
+        "label": "API gateway",
+        "kind": "edge"
+       }
+      ],
+      [
+       {
+        "label": "Upload service",
+        "kind": "service",
+        "sub": "presigned URLs"
+       },
+       {
+        "label": "Post service",
+        "kind": "service"
+       },
+       {
+        "label": "Feed service",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Object storage",
+        "kind": "store"
+       },
+       {
+        "label": "Media processing",
+        "kind": "queue",
+        "sub": "resize, transcode"
+       },
+       {
+        "label": "Fan-out workers",
+        "kind": "service"
+       }
+      ],
+      [
+       {
+        "label": "Sharded Postgres",
+        "kind": "db"
+       },
+       {
+        "label": "Feed cache",
+        "kind": "cache"
+       },
+       {
+        "label": "Cassandra",
+        "kind": "db",
+        "sub": "likes, stories"
+       }
+      ]
+     ],
+     "caption": "Media goes straight to storage; metadata and feed go through services"
+    },
+    {
+     "t": "list",
+     "items": [
+      "App gets a presigned URL, uploads the original straight to object storage, and shows it locally right away.",
+      "Storage event → processing creates sizes (150 px thumbnail up to 1080 px) and video renditions; CDN serves them.",
+      "App creates the post with the media ID; post service writes metadata and publishes PostCreated.",
+      "Fan-out workers push post IDs into followers' feed caches (skip celebrities and inactive users).",
+      "Feed read: cached IDs + celebrity pulls → ranking → hydrate → return."
+     ],
+     "ordered": true
+    }
+   ]
+  },
+  {
+   "id": "feed",
+   "title": "Deep dive: feed ranking",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Candidates: followed accounts' recent posts (pushed + pulled), plus suggested posts.",
+      "Ranking model predicts p(like), p(comment), p(save), p(time spent); score = weighted sum; then diversity rules (no 5 posts in a row from one author).",
+      "Precompute feeds for users likely to open the app soon; compute lazily for others.",
+      "Seen-state: keep a bloom filter / recent set per user to avoid repeats."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "stories",
+   "title": "Deep dive: Stories",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Separate pipeline from feed: stories expire after 24 h, so storage uses TTL (Cassandra TTL, object lifecycle rules).",
+      "Story tray = ranked list of followed users with active stories; cache per user, invalidate on new story by followees (fan-out of a 'has new story' marker, not content).",
+      "Prefetch the first story's media for the top tray entries for instant playback.",
+      "Seen markers per (viewer, story) written async; viewer lists for authors read from Cassandra."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "counters",
+   "title": "Deep dive: likes and counters",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Write the like (post_id, user_id) idempotently; increment counters asynchronously.",
+      "Hot posts: sharded counters or batched increments (aggregate in memory for 1 s, then write).",
+      "Show approximate counts (\"1.2M likes\"); exact for small numbers.",
+      "Notifications: like events → aggregation ('Alice and 20 others liked your photo') → push."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Scaling & failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Celebrity post",
+       "Fan-out storm + hot counters",
+       "Pull path for celebrities, sharded counters, cache replicas"
+      ],
+      [
+       "Processing backlog",
+       "Posts without thumbnails",
+       "Uploader sees local copy; prioritize small sizes; autoscale workers"
+      ],
+      [
+       "Postgres shard hot",
+       "Slow profile/posts",
+       "Move logical shards to new hosts; read replicas; cache"
+      ],
+      [
+       "CDN miss storm on viral media",
+       "Origin load",
+       "Origin shield, pre-warm after posting for big accounts"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Metadata DB",
+       "Sharded Postgres with ID-encoded shard",
+       "Cross-shard joins"
+      ],
+      [
+       "Feed",
+       "Hybrid fan-out + ranking",
+       "Pure chronological simplicity"
+      ],
+      [
+       "Counts",
+       "Async, approximate",
+       "Exact real-time counts"
+      ],
+      [
+       "Uploads",
+       "Direct to storage",
+       "Server-side control of bytes"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Upload, follow, feed, stories, likes."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Fast feed, instant upload feel, celebrity skew."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "200 TB/day media, 1M feed reads/s."
+      },
+      {
+       "min": "12–17",
+       "title": "API + data",
+       "text": "Presigned upload, ID with shard bits."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "Storage + processing; post service; fan-out; feed cache."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Feed ranking, Stories TTL, counters."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Celebrity handling, CDN metrics, processing lag."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "How does Explore work?",
+       "a": "Embedding-based candidate retrieval from accounts/posts similar to what you engage with, then a ranking model; heavily cached."
+      },
+      {
+       "q": "How do you delete a post everywhere?",
+       "a": "Tombstone in metadata; feeds filter at hydration; CDN purge for media; async cleanup."
+      },
+      {
+       "q": "How do you handle DMs?",
+       "a": "Separate messaging system (like WhatsApp/Slack design): per-conversation partitions, WebSocket/MQTT delivery."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Presigned direct uploads; async resize/transcode; CDN delivery.",
+      "IDs encode logical shard → routing without lookup.",
+      "Hybrid fan-out; celebrities pulled at read.",
+      "Stories = TTL storage + tray cache.",
+      "Likes written idempotently, counted async."
+     ]
+    }
+   ]
+  }
+ ]
+}

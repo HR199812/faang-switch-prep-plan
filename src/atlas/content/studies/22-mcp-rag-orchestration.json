@@ -1,0 +1,574 @@
+{
+ "id": "mcp-rag-orchestration",
+ "num": 22,
+ "title": "MCP + RAG Orchestration",
+ "summary": "An orchestrated AI assistant over company knowledge and tools: a RAG pipeline (ingest, chunk, embed, hybrid retrieve, rerank) built with LangChain, a LangGraph state machine that routes between retrieval, MCP tools and human review, and LangSmith for tracing and evaluation.",
+ "tags": [
+  "MCP",
+  "RAG",
+  "LangGraph",
+  "LangSmith"
+ ],
+ "difficulty": "Hard",
+ "related": [
+  "search",
+  "caching",
+  "queues-kafka",
+  "ops-security",
+  "resilience"
+ ],
+ "published": "2026-10-29",
+ "sections": [
+  {
+   "id": "requirements",
+   "title": "Requirements",
+   "blocks": [
+    {
+     "t": "p",
+     "text": "Framing: an internal assistant for a bank's operations team that answers questions from policies, runbooks and tickets with citations, and can take actions (look up a trade, open a Jira ticket, query a database) through MCP servers."
+    },
+    {
+     "t": "table",
+     "head": [
+      "Type",
+      "Requirement"
+     ],
+     "rows": [
+      [
+       "Functional",
+       "Ask questions; get grounded answers with citations to source documents"
+      ],
+      [
+       "Functional",
+       "Call tools: Jira, Confluence, SQL read replicas, internal APIs — via MCP"
+      ],
+      [
+       "Functional",
+       "Multi-turn conversations; human approval before write actions"
+      ],
+      [
+       "Non-functional",
+       "Answers respect document permissions (user sees only what they may read)"
+      ],
+      [
+       "Non-functional",
+       "First token < 2 s; retrieval < 300 ms"
+      ],
+      [
+       "Non-functional",
+       "Every run traceable and evaluated; regression tests on prompt/model changes"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "estimation",
+   "title": "Estimation",
+   "blocks": [
+    {
+     "t": "stats",
+     "items": [
+      {
+       "label": "Documents",
+       "value": "2M",
+       "sub": "≈ 20M chunks"
+      },
+      {
+       "label": "Vectors",
+       "value": "20M × 1024-d",
+       "sub": "≈ 80 GB float32"
+      },
+      {
+       "label": "Queries / day",
+       "value": "200k",
+       "sub": "≈ 10/s peak 30"
+      },
+      {
+       "label": "Re-index",
+       "value": "~50k docs/day",
+       "sub": "incremental"
+      }
+     ]
+    },
+    {
+     "t": "callout",
+     "tone": "say",
+     "title": "Say it in the interview",
+     "text": "The corpus fits comfortably in one vector cluster; the hard parts are retrieval quality, permission filtering, and orchestrating tools safely."
+    }
+   ]
+  },
+  {
+   "id": "mcp",
+   "title": "MCP: Model Context Protocol",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Open protocol (introduced by Anthropic, now widely adopted) that standardizes how AI applications connect to tools and data — 'USB-C for AI integrations'.",
+      "**Roles:** a *host* (the AI app) runs one *client* per connection to an MCP *server*; servers expose capabilities.",
+      "**Server primitives:** *tools* (functions the model can call, with JSON-schema inputs), *resources* (readable data identified by URIs), *prompts* (reusable templates).",
+      "**Client features** servers may request: *sampling* (ask the host's model for a completion), *roots* (filesystem boundaries), *elicitation* (ask the user for input).",
+      "**Wire format:** JSON-RPC 2.0 with capability negotiation in `initialize`; `tools/list`, `tools/call`, `resources/read`, notifications for list changes.",
+      "**Transports:** stdio for local servers; Streamable HTTP (with optional SSE streaming) for remote servers; OAuth 2.1-based authorization for remote servers.",
+      "M apps × N integrations becomes M + N, like LSP did for editors."
+     ]
+    },
+    {
+     "t": "code",
+     "lang": "json",
+     "text": "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\n \"params\":{\"name\":\"jira_create_issue\",\n            \"arguments\":{\"project\":\"OPS\",\"summary\":\"Trade 88123 settlement break\",\"priority\":\"High\"}}}"
+    },
+    {
+     "t": "callout",
+     "tone": "warn",
+     "title": "Trap",
+     "text": "An MCP server's tool descriptions and outputs are untrusted input to the model. Pin and review servers, scope their credentials, and require approval for write tools."
+    }
+   ]
+  },
+  {
+   "id": "rag",
+   "title": "RAG pipeline",
+   "blocks": [
+    {
+     "t": "steps",
+     "items": [
+      {
+       "title": "Ingest",
+       "text": "Connectors (Confluence, SharePoint, Jira) via loaders or CDC; store raw + metadata (ACLs, owner, updated_at)."
+      },
+      {
+       "title": "Chunk",
+       "text": "Structure-aware splitting (headings, tables) ~300–800 tokens with overlap; keep parent-document links."
+      },
+      {
+       "title": "Embed",
+       "text": "Batch embeddings; store vector + text + metadata; version the embedding model."
+      },
+      {
+       "title": "Retrieve",
+       "text": "Hybrid: BM25 + vector kNN with metadata/ACL filters; reciprocal rank fusion."
+      },
+      {
+       "title": "Rerank",
+       "text": "Cross-encoder reranker on top ~50 → top 5–8 chunks."
+      },
+      {
+       "title": "Generate",
+       "text": "Prompt with numbered sources; require citations; refuse when context is insufficient."
+      }
+     ]
+    },
+    {
+     "t": "table",
+     "head": [
+      "Technique",
+      "Fixes"
+     ],
+     "rows": [
+      [
+       "Query rewriting / multi-query",
+       "Vague or conversational questions"
+      ],
+      [
+       "HyDE",
+       "Short queries that don't match document wording"
+      ],
+      [
+       "Parent-document retrieval",
+       "Small chunks match, big context answers"
+      ],
+      [
+       "Metadata filters",
+       "Freshness, product, region, permissions"
+      ],
+      [
+       "Contextual chunk headers",
+       "Chunks that lose meaning out of context"
+      ],
+      [
+       "GraphRAG",
+       "Questions spanning many related entities"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "langchain",
+   "title": "LangChain, LangGraph, LangSmith — who does what",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Library",
+      "Role in this design",
+      "Key pieces"
+     ],
+     "rows": [
+      [
+       "LangChain",
+       "Building blocks: models, prompts, loaders, splitters, embeddings, vector stores, retrievers, tool calling",
+       "Runnables / LCEL (`prompt | model | parser`), `RecursiveCharacterTextSplitter`, `EnsembleRetriever`, `bind_tools`"
+      ],
+      [
+       "LangGraph",
+       "Orchestration as a stateful graph: nodes, edges, conditional routing, loops, human-in-the-loop",
+       "`StateGraph`, conditional edges, checkpointers (Postgres) per thread, `interrupt()` for approvals, streaming"
+      ],
+      [
+       "LangSmith",
+       "Observability and evaluation",
+       "Traces of every run, datasets, evaluators (LLM-as-judge, custom), experiments comparing prompts/models, online monitoring"
+      ],
+      [
+       "langchain-mcp-adapters",
+       "Load MCP server tools as LangChain tools",
+       "Multi-server client; tools usable by LangGraph agents"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hld",
+   "title": "High-level design",
+   "blocks": [
+    {
+     "t": "flow",
+     "rows": [
+      [
+       {
+        "label": "Chat UI",
+        "kind": "client",
+        "sub": "SSE streaming"
+       }
+      ],
+      [
+       {
+        "label": "API + auth",
+        "kind": "edge",
+        "sub": "user identity, ACLs"
+       },
+       {
+        "label": "LangGraph runtime",
+        "kind": "service",
+        "sub": "state machine per thread"
+       }
+      ],
+      [
+       {
+        "label": "Retriever",
+        "kind": "service",
+        "sub": "hybrid + rerank"
+       },
+       {
+        "label": "MCP client",
+        "kind": "service",
+        "sub": "tool calls"
+       },
+       {
+        "label": "LLM gateway",
+        "kind": "service",
+        "sub": "routing, limits"
+       }
+      ],
+      [
+       {
+        "label": "Vector + BM25 index",
+        "kind": "store",
+        "sub": "OpenSearch / pgvector"
+       },
+       {
+        "label": "MCP servers",
+        "kind": "ext",
+        "sub": "Jira, Confluence, SQL, trade API"
+       }
+      ],
+      [
+       {
+        "label": "Checkpointer",
+        "kind": "db",
+        "sub": "Postgres"
+       },
+       {
+        "label": "LangSmith",
+        "kind": "service",
+        "sub": "traces + evals"
+       },
+       {
+        "label": "Ingestion pipeline",
+        "kind": "queue",
+        "sub": "loaders → chunk → embed"
+       }
+      ]
+     ],
+     "caption": "LangGraph orchestrates; retrieval and MCP tools are nodes; LangSmith sees everything"
+    }
+   ]
+  },
+  {
+   "id": "graph",
+   "title": "Deep dive: the LangGraph state machine",
+   "blocks": [
+    {
+     "t": "code",
+     "lang": "python",
+     "text": "class State(TypedDict):\n    messages: Annotated[list, add_messages]\n    docs: list\n    route: str\n\ng = StateGraph(State)\ng.add_node('classify', classify_intent)      # question | action | chit-chat\ng.add_node('retrieve', hybrid_retrieve)      # ACL-filtered hybrid search + rerank\ng.add_node('grade', grade_documents)         # drop irrelevant chunks; maybe rewrite query\ng.add_node('generate', answer_with_citations)\ng.add_node('agent', tool_agent)              # LLM with MCP tools bound\ng.add_node('approve', human_approval)        # interrupt() before write tools\ng.add_edge(START, 'classify')\ng.add_conditional_edges('classify', lambda s: s['route'], {'question': 'retrieve', 'action': 'agent'})\ng.add_edge('retrieve', 'grade')\ng.add_conditional_edges('grade', enough_context, {True: 'generate', False: 'retrieve'})   # corrective RAG loop (max 2)\ng.add_conditional_edges('agent', needs_approval, {True: 'approve', False: END})\ng.add_edge('approve', 'agent')\ng.add_edge('generate', END)\napp = g.compile(checkpointer=PostgresSaver(conn))   # thread_id = conversation"
+    },
+    {
+     "t": "list",
+     "items": [
+      "Checkpointer persists state per `thread_id`: conversations resume, crashes recover, approvals can wait hours.",
+      "`interrupt()` pauses before a write tool; the UI shows the proposed action; `Command(resume=...)` continues.",
+      "Bound loops (max retrieval retries, max tool steps) in state.",
+      "Stream tokens and intermediate steps to the UI."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "security",
+   "title": "Deep dive: permissions and safety",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "Document ACLs copied into chunk metadata at ingest; retrieval always filters by the user's groups (pre-filter, not post-filter, so top-k isn't emptied).",
+      "MCP servers run with per-user OAuth tokens or narrowly scoped service credentials; SQL tools hit read replicas with row-level security and query timeouts.",
+      "Allowlist MCP servers and tools per assistant; pin versions; review tool descriptions for injected instructions.",
+      "Write tools require approval; all calls audited with user, tool, arguments, result.",
+      "PII redaction before logging to LangSmith where required; data residency for traces."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "evals",
+   "title": "Deep dive: evaluation with LangSmith",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Eval",
+      "Measures",
+      "How"
+     ],
+     "rows": [
+      [
+       "Retrieval recall@k / MRR",
+       "Are the right chunks found?",
+       "Labelled question → source pairs"
+      ],
+      [
+       "Faithfulness / groundedness",
+       "Answer supported by retrieved context?",
+       "LLM-as-judge evaluator"
+      ],
+      [
+       "Answer correctness",
+       "Matches reference answer",
+       "Reference-based judge or exact checks"
+      ],
+      [
+       "Citation accuracy",
+       "Citations point to supporting chunks",
+       "Rule + judge"
+      ],
+      [
+       "Tool-use accuracy",
+       "Right tool, valid args, approvals respected",
+       "Trajectory evaluators"
+      ],
+      [
+       "Latency / cost",
+       "p95 and tokens per run",
+       "Trace metadata"
+      ]
+     ]
+    },
+    {
+     "t": "list",
+     "items": [
+      "Run experiments in CI when prompts, models, chunking or retrievers change; block regressions.",
+      "Online: sample production traces, add thumbs-down cases to datasets, monitor dashboards."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "failures",
+   "title": "Failure modes",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Failure",
+      "Impact",
+      "Mitigation"
+     ],
+     "rows": [
+      [
+       "Retrieval misses",
+       "Wrong or 'I don't know' answers",
+       "Hybrid search, reranking, query rewriting, eval recall"
+      ],
+      [
+       "Stale index",
+       "Outdated policy cited",
+       "Incremental CDC ingest, updated_at filters, delete propagation"
+      ],
+      [
+       "Hallucinated citations",
+       "Trust loss",
+       "Constrain citations to provided IDs, groundedness check node"
+      ],
+      [
+       "MCP server down / slow",
+       "Action fails",
+       "Timeouts, retries, graceful message, circuit breaker per server"
+      ],
+      [
+       "Prompt injection in a document",
+       "Unsafe tool calls",
+       "Treat retrieved text as data, approvals, tool allowlists"
+      ],
+      [
+       "Embedding model change",
+       "Mixed vector spaces",
+       "Version embeddings; re-embed into new index, switch alias"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tradeoffs",
+   "title": "Trade-offs",
+   "blocks": [
+    {
+     "t": "table",
+     "head": [
+      "Decision",
+      "Chose",
+      "Gave up"
+     ],
+     "rows": [
+      [
+       "Retrieval",
+       "Hybrid + rerank",
+       "Lowest latency of pure vector search"
+      ],
+      [
+       "Orchestration",
+       "Explicit LangGraph graph",
+       "Flexibility of a free-form agent"
+      ],
+      [
+       "Tools",
+       "MCP servers",
+       "Hand-written bespoke integrations (less portable)"
+      ],
+      [
+       "Chunking",
+       "Structure-aware + parent docs",
+       "Simple fixed-size chunks"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "Interview script",
+   "blocks": [
+    {
+     "t": "timeline",
+     "items": [
+      {
+       "min": "0–5",
+       "title": "Requirements",
+       "text": "Grounded Q&A + tools + approvals."
+      },
+      {
+       "min": "5–8",
+       "title": "Non-functional",
+       "text": "Permissions, latency, traceability."
+      },
+      {
+       "min": "8–12",
+       "title": "Estimation",
+       "text": "Chunks, vector size, QPS."
+      },
+      {
+       "min": "12–17",
+       "title": "Components",
+       "text": "RAG pipeline, MCP, LangChain/LangGraph/LangSmith roles."
+      },
+      {
+       "min": "17–27",
+       "title": "HLD",
+       "text": "UI → LangGraph → retriever + MCP + LLM; checkpointer; traces."
+      },
+      {
+       "min": "27–40",
+       "title": "Deep dives",
+       "text": "Graph routing + corrective RAG, ACL filtering, evals."
+      },
+      {
+       "min": "40–45",
+       "title": "Wrap-up",
+       "text": "Injection defenses, index freshness, eval gates."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "follow-ups",
+   "title": "Follow-up questions",
+   "blocks": [
+    {
+     "t": "qa",
+     "items": [
+      {
+       "q": "Why MCP instead of plain function calling?",
+       "a": "Function calling is how a model asks for a tool; MCP standardizes how tools are discovered, described, authorized and transported, so any MCP-capable host can reuse the same Jira or database server."
+      },
+      {
+       "q": "How do you choose chunk size?",
+       "a": "Empirically with retrieval evals: smaller chunks raise precision, larger ones keep context; parent-document retrieval gets both."
+      },
+      {
+       "q": "When do you need GraphRAG?",
+       "a": "When answers require connecting many entities (e.g. 'which counterparties are affected by this settlement change?'); build an entity graph and retrieve subgraphs."
+      },
+      {
+       "q": "LangGraph vs a plain LangChain agent?",
+       "a": "LangGraph gives explicit control flow, persistence, interrupts and bounded loops — needed for production workflows with approvals."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cheatsheet",
+   "title": "Cheat sheet",
+   "blocks": [
+    {
+     "t": "list",
+     "items": [
+      "MCP: host/client/server; tools, resources, prompts; JSON-RPC; stdio or Streamable HTTP.",
+      "RAG: ingest → chunk → embed → hybrid retrieve → rerank → cite.",
+      "LangChain = components; LangGraph = stateful graph + checkpoints + interrupts; LangSmith = traces + evals.",
+      "Filter by ACL at retrieval time.",
+      "Approvals before write tools; treat retrieved text and tool output as untrusted.",
+      "Eval retrieval and groundedness in CI."
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,5 +1,13 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, lazy, Suspense } from "react";
 import { PHASES, TRACKS, WEEKS, MILESTONES, DAILY_BLOCKS } from "./data/weeks.js";
+import { usePractice, dueCount } from "./practice/store.js";
+
+// The practice area (problems, code runner, Claude review) loads as its own chunk.
+const Practice = lazy(() => import("./practice/Practice.jsx"));
+const ProblemPage = lazy(() => import("./practice/Practice.jsx").then((m) => ({ default: m.ProblemPage })));
+const WeekPractice = lazy(() => import("./practice/Practice.jsx").then((m) => ({ default: m.WeekPractice })));
+const WeekLeetCode = lazy(() => import("./practice/Practice.jsx").then((m) => ({ default: m.WeekLeetCode })));
+const LeetCodeLists = lazy(() => import("./practice/Practice.jsx").then((m) => ({ default: m.LeetCodeListsPage })));
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const phaseFor = (n) => PHASES.find((p) => n >= p.weeks[0] && n <= p.weeks[1]);
@@ -9,423 +17,292 @@ const TRACK_LABELS = {
   dsa: "DSA", dp: "DP", sd: "Sys Design", fsd: "Full-Stack", mock: "Mock / Apply", beh: "Behavioural",
 };
 
+// The data file's neon hex colours map onto the Atlas palette tokens (--t-*), which
+// have light and dark variants. Phase and milestone colours reuse the track hexes.
+const HEX_TO_TRACK = Object.fromEntries(TRACKS.map((t) => [t.color.toUpperCase(), t.key]));
+const tone = (hexOrKey) => {
+  const key = HEX_TO_TRACK[String(hexOrKey).toUpperCase()] || hexOrKey;
+  return TRACK_LABELS[key] ? `var(--t-${key})` : "var(--accent)";
+};
+const soft = (color, pct = 12) => `color-mix(in srgb, ${color} ${pct}%, transparent)`;
+
+// ─── Icons (same set and stroke style as the Atlas) ──────────────────────────
+const I = {
+  week: "M4 5h16v15H4zM4 9h16M9 3v4M15 3v4",
+  grid: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+  heat: "M3 3h4v4H3zM10 3h4v4h-4zM17 3h4v4h-4zM3 10h4v4H3zM10 10h4v4h-4zM17 10h4v4h-4zM3 17h4v4H3zM10 17h4v4h-4zM17 17h4v4h-4z",
+  clock: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2",
+  flag: "M5 21V4M5 4h11l-2 4 2 4H5",
+  bolt: "M13 2 4 14h7l-1 8 9-12h-7z",
+  map: "M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3zM9 3v15M15 6v15",
+  check: "M5 12.5l4.5 4.5L19 7.5",
+  arrow: "M5 12h14M13 6l6 6-6 6",
+  back: "M19 12H5M11 6l-6 6 6 6",
+  chev: "M9 6l6 6-6 6",
+  code: "M8 6l-6 6 6 6M16 6l6 6-6 6",
+  list: "M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01",
+};
+const Icon = ({ n, s = 18 }) => (
+  <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={I[n]} /></svg>
+);
+const Mark = () => (
+  <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="8" fill="var(--ink)" /><circle cx="10" cy="10" r="3" fill="var(--accent)" /><circle cx="22" cy="10" r="3" fill="var(--bg)" /><circle cx="16" cy="22" r="3" fill="var(--bg)" /><path d="M10 10L16 22L22 10" stroke="var(--bg)" strokeWidth="1.6" fill="none" /></svg>
+);
+
+const VIEWS = [
+  { key: "week",       label: "Week plan",   short: "Week",     icon: "week" },
+  { key: "practice",   label: "Practice",    short: "Practice", icon: "code" },
+  { key: "lists",      label: "LeetCode lists", short: "Lists",  icon: "list", dock: false },
+  { key: "overview",   label: "Overview",    short: "Overview", icon: "grid" },
+  { key: "heatmap",    label: "Heatmap",     short: "Heatmap",  icon: "heat", dock: false },
+  { key: "daily",      label: "Daily split", short: "Daily",    icon: "clock" },
+  { key: "milestones", label: "Milestones",  short: "Goals",    icon: "flag" },
+  { key: "streaks",    label: "Streaks",     short: "Streaks",  icon: "bolt" },
+];
+
 // ─── Styles (CSS-in-JS strings injected via <style>) ─────────────────────────
+// Tokens, fonts and shell are shared with the System Design Atlas (src/atlas/Atlas.jsx).
+const PALETTE_LIGHT = `
+    --bg:#F2F4F6; --surface:#FFFFFF; --surface-2:#E8ECF0; --ink:#121A24; --muted:#556172; --line:#D3DAE2;
+    --accent:#D9530A; --accent-soft:rgba(217,83,10,.10); --cobalt:#2B57C9; --cobalt-soft:rgba(43,87,201,.10);
+    --good:#0F7A55; --good-soft:rgba(15,122,85,.12); --bad:#C2341B; --bad-soft:rgba(194,52,27,.10);
+    --t-dsa:#2B57C9; --t-dp:#6D3FD1; --t-sd:#0F7A55; --t-fsd:#C2410C; --t-mock:#BE2F73; --t-beh:#A16207;
+    --shadow:0 1px 2px rgba(18,26,36,.06),0 8px 24px -12px rgba(18,26,36,.18);`;
+const PALETTE_DARK = `
+    --bg:#0C1219; --surface:#131B25; --surface-2:#1A2431; --ink:#E4E9EF; --muted:#94A2B4; --line:#253142;
+    --accent:#FF7A33; --accent-soft:rgba(255,122,51,.14); --cobalt:#7FA3FF; --cobalt-soft:rgba(127,163,255,.13);
+    --good:#3CC48F; --good-soft:rgba(60,196,143,.14); --bad:#FF6B52; --bad-soft:rgba(255,107,82,.13);
+    --t-dsa:#7FA3FF; --t-dp:#A98BFF; --t-sd:#3CC48F; --t-fsd:#FF8A4C; --t-mock:#F57AB4; --t-beh:#E5B13A;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px -14px rgba(0,0,0,.6); color-scheme:dark;`;
+
 const GLOBAL_CSS = `
-  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&family=Outfit:wght@300;400;500;600;700&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  :root {
-    --font-mono: 'JetBrains Mono', monospace;
-    --font-sans: 'Outfit', sans-serif;
-    --bg: #09090C;
-    --bg1: #0F0F14;
-    --bg2: #141419;
-    --bg3: #1A1A22;
-    --border: #1E1E2A;
-    --border2: #2A2A38;
-    --text: #E8E8F0;
-    --text2: #8888A0;
-    --text3: #444458;
-    --accent: #22D3EE;
+  :root {${PALETTE_LIGHT}
+    --f-display:"Archivo","Arial Narrow",system-ui,sans-serif; --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+    --rail:264px; --dock:64px;
   }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){${PALETTE_DARK}} }
+  :root[data-theme="dark"]{${PALETTE_DARK}}
 
-  html, body, #root { height: 100%; width: 100%; }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); }
+  .trk { background: var(--bg); color: var(--ink); min-height: 100vh; font-family: var(--f-body); font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  .trk::before { content:""; position:fixed; inset:0 0 auto; height:env(safe-area-inset-top,0px); z-index:40; background:var(--bg); }
+  .trk a { color: inherit; }
+  .trk button { font: inherit; color: inherit; }
+  .trk :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  .trk h1, .trk h2, .trk h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; letter-spacing: -.01em; }
+  .eyebrow { font-family: var(--f-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .muted { color: var(--muted); }
+  .mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
 
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-sans);
-    font-size: 18px;
-    line-height: 1.5;
-    overflow: hidden;
-  }
-
-  ::-webkit-scrollbar { width: 4px; height: 4px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
-
-  /* Sidebar */
-  .sidebar {
-    width: 220px;
-    flex-shrink: 0;
-    background: var(--bg1);
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .sidebar-logo {
-    padding: 16px 16px 14px;
-    border-bottom: 1px solid var(--border);
-  }
-  .sidebar-logo h1 {
-    font-family: var(--font-mono);
-    font-size: 16px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--text);
-  }
-  .sidebar-logo p {
-    font-size: 14px;
-    color: var(--text3);
-    margin-top: 2px;
-    font-family: var(--font-mono);
-  }
-
-  .sidebar-nav {
-    flex: 1;
-    overflow-y: auto;
-    padding: 8px 0;
+  /* shell */
+  .rail { position:fixed; top:0; bottom:0; left:0; width:var(--rail); background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; z-index:30; padding-top:env(safe-area-inset-top,0px); padding-left:env(safe-area-inset-left,0px); }
+  .brand { display:flex; align-items:center; gap:10px; padding:20px 20px 14px; text-decoration:none; background:none; border:0; cursor:pointer; text-align:left; }
+  .brand-mark { width:30px; height:30px; flex:none; }
+  .brand-name { font-family:var(--f-display); font-weight:800; font-stretch:115%; font-size:17px; line-height:1.05; letter-spacing:-.01em; }
+  .brand-name small { display:block; font-family:var(--f-mono); font-weight:400; font-stretch:100%; font-size:11px; color:var(--muted); letter-spacing:.06em; text-transform:uppercase; margin-top:3px; }
+  .atlas-link { margin:4px 16px 12px; display:flex; align-items:center; gap:8px; padding:9px 12px; border:1px solid var(--line); background:var(--bg); border-radius:10px; color:var(--ink); font-size:14px; font-weight:600; text-decoration:none; transition:border-color .2s; }
+  .atlas-link:hover { border-color:var(--accent); }
+  .atlas-link svg:last-child { margin-left:auto; color:var(--accent); }
+  .rail-progress { margin:0 20px 6px; }
+  .rail-progress .row { display:flex; justify-content:space-between; font-size:12px; }
+  .nav { overflow-y:auto; padding:4px 10px 20px; flex:1; }
+  .nav-group { margin-top:14px; }
+  .nav-group .eyebrow { padding:0 10px 6px; display:flex; align-items:center; gap:7px; font-size:11px; }
+  .nav-group .eyebrow i { width:7px; height:7px; border-radius:2px; flex:none; }
+  .nav-item { display:flex; align-items:center; gap:10px; width:100%; padding:7px 10px; border:0; border-radius:8px; background:transparent; cursor:pointer; text-align:left; font-size:14px; color:var(--muted); position:relative; transition:background .15s,color .15s; }
+  .nav-item:hover { background:var(--surface-2); color:var(--ink); }
+  .nav-item.on { color:var(--ink); background:var(--accent-soft); font-weight:600; }
+  .nav-item.on::before { content:""; position:absolute; left:-10px; top:8px; bottom:8px; width:3px; border-radius:3px; background:var(--accent); }
+  .nav-item .num { font-family:var(--f-mono); font-size:11px; color:var(--muted); width:20px; flex:none; }
+  .nav-item .t { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .nav-item .tick { margin-left:auto; color:var(--good); display:flex; }
+  .main { margin-left:var(--rail); min-height:100vh; padding-bottom:48px; }
+  .topbar, .dock { display:none; }
+  .wrap { max-width:1120px; margin:0 auto; padding-left:max(28px,env(safe-area-inset-left,0px)); padding-right:max(28px,env(safe-area-inset-right,0px)); padding-block:32px; }
+  .wrap.wide { max-width:1480px; }
+  .nav-item .badge { margin-left:auto; font-family:var(--f-mono); font-size:11px; font-weight:500; min-width:20px; padding:1px 6px; border-radius:999px; background:var(--accent); color:#fff; text-align:center; }
+  .icon-btn { border:1px solid var(--line); background:var(--surface); border-radius:10px; width:40px; height:40px; display:grid; place-items:center; cursor:pointer; }
+  @media (max-width:900px){
+    .rail { display:none; }
+    .main { margin-left:0; padding-bottom:calc(var(--dock) + 24px + env(safe-area-inset-bottom,0px)); }
+    .topbar { display:flex; position:sticky; top:env(safe-area-inset-top,0px); z-index:25; align-items:center; gap:10px; background:color-mix(in srgb,var(--bg) 88%,transparent); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); border-bottom:1px solid var(--line); padding-block:10px; padding-left:max(16px,env(safe-area-inset-left,0px)); padding-right:max(16px,env(safe-area-inset-right,0px)); }
+    .topbar .brand { padding:0; }
+    .topbar .atlas-link { margin:0 0 0 auto; padding:6px 10px; font-size:13px; }
+    .dock { display:flex; position:fixed; left:0; right:0; bottom:0; z-index:30; background:var(--surface); border-top:1px solid var(--line); padding-bottom:env(safe-area-inset-bottom,0px); padding-left:env(safe-area-inset-left,0px); padding-right:env(safe-area-inset-right,0px); }
+    .dock button { flex:1; min-width:0; display:flex; flex-direction:column; align-items:center; gap:2px; padding:9px 0 8px; border:0; background:none; cursor:pointer; font-size:11px; color:var(--muted); position:relative; }
+    .dock button.on { color:var(--accent); }
+    .dock button.on::after { content:""; position:absolute; top:0; left:30%; right:30%; height:2px; background:var(--accent); border-radius:0 0 2px 2px; animation:grow .3s ease-out; }
+    .wrap { padding-left:max(16px,env(safe-area-inset-left,0px)); padding-right:max(16px,env(safe-area-inset-right,0px)); padding-block:20px; }
   }
 
-  .nav-section {
-    padding: 8px 14px 4px;
-    font-size: 13px;
-    font-family: var(--font-mono);
-    letter-spacing: 0.15em;
-    color: var(--text3);
-    text-transform: uppercase;
-  }
+  /* motion */
+  .page { animation:enter .42s cubic-bezier(.2,.7,.2,1) both; }
+  .stagger > * { animation:enter .5s cubic-bezier(.2,.7,.2,1) both; animation-delay:calc(min(var(--i,0),8) * 55ms); }
+  @keyframes enter { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
+  @keyframes grow { from { transform:scaleX(0); } to { transform:scaleX(1); } }
+  @keyframes pop { 0% { transform:scale(.85); } 60% { transform:scale(1.12); } 100% { transform:scale(1); } }
+  @media (prefers-reduced-motion: reduce){ *, *::before, *::after { animation:none!important; transition:none!important; } }
 
-  .nav-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 14px;
-    cursor: pointer;
-    border: none;
-    background: transparent;
-    width: 100%;
-    text-align: left;
-    color: var(--text2);
-    font-family: var(--font-sans);
-    font-size: 16px;
-    transition: all 0.12s;
-    border-left: 2px solid transparent;
-  }
-  .nav-item:hover { background: var(--bg2); color: var(--text); }
-  .nav-item.active { background: var(--bg3); color: var(--text); border-left-color: var(--item-color, var(--accent)); }
-  .nav-item .week-num {
-    font-family: var(--font-mono);
-    font-size: 14px;
-    color: inherit;
-    opacity: 0.7;
-    min-width: 28px;
-  }
-  .nav-item .week-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    flex-shrink: 0;
-    background: var(--item-color, var(--border2));
-  }
-  .nav-item .week-title {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 15px;
-  }
+  /* shared atoms */
+  .panel { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:18px; min-width:0; }
+  .panel h3 { font-size:18px; font-weight:700; font-stretch:108%; }
+  .pill { display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:999px; white-space:nowrap; }
+  .btn { display:inline-flex; align-items:center; gap:8px; padding:9px 14px; border-radius:10px; border:1px solid var(--line); background:var(--surface); cursor:pointer; font-size:14px; font-weight:600; transition:transform .15s,border-color .15s,background .15s; }
+  .btn:hover:not([disabled]) { border-color:var(--accent); }
+  .btn:active:not([disabled]) { transform:scale(.97); }
+  .btn[disabled] { opacity:.45; cursor:default; }
+  .meter { height:6px; background:var(--surface-2); border-radius:6px; overflow:hidden; }
+  .meter i { display:block; height:100%; background:var(--accent); border-radius:6px; transition:width .45s cubic-bezier(.2,.7,.2,1); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .stats > div { padding:14px; border-radius:12px; background:var(--surface); border:1px solid var(--line); }
+  .stats b { display:block; font-family:var(--f-display); font-stretch:112%; font-size:26px; font-variant-numeric:tabular-nums; line-height:1.1; }
+  .stats span { font-size:12.5px; color:var(--muted); }
+  .sec-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin:34px 0 14px; flex-wrap:wrap; }
+  .sec-head h2 { font-size:24px; font-weight:750; font-stretch:112%; }
+  .page-head { margin-bottom:22px; }
+  .page-head h1 { font-size:clamp(30px,4.6vw,46px); line-height:1.02; font-weight:800; font-stretch:116%; margin:8px 0 12px; }
+  .page-head h1 em { font-style:normal; color:var(--accent); }
+  .page-head p.lede { font-size:18px; color:var(--muted); max-width:62ch; margin:0; }
+  .callout { border-radius:12px; padding:14px 16px; display:grid; gap:4px; background:var(--accent-soft); }
+  .callout .ct { font-family:var(--f-mono); font-size:11.5px; letter-spacing:.07em; text-transform:uppercase; font-weight:500; color:var(--accent); }
+  .key-row { display:flex; flex-wrap:wrap; gap:6px 14px; font-size:13px; color:var(--muted); }
+  .key-row span { display:inline-flex; align-items:center; gap:6px; }
+  .key-row i { width:10px; height:10px; border-radius:3px; }
 
-  /* Tabs */
-  .tab-bar {
-    display: flex;
-    border-bottom: 1px solid var(--border);
-    padding: 0 20px;
-    gap: 0;
-    flex-shrink: 0;
+  /* week view */
+  .crumbs { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .week-bar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin:18px 0 22px; }
+  .week-bar .meter { flex:1; min-width:140px; }
+  .week-bar .nav-btns { display:flex; gap:8px; }
+  .chipbar { display:none; }
+  @media (max-width:900px){
+    .chipbar { display:flex; gap:6px; overflow-x:auto; margin:0 0 16px; padding-bottom:4px; scrollbar-width:none; }
+    .chipbar::-webkit-scrollbar { display:none; }
+    .chipbar button { flex:none; font-family:var(--f-mono); font-size:13px; padding:5px 11px; border-radius:999px; border:1px solid var(--line); color:var(--muted); background:var(--surface); cursor:pointer; }
+    .chipbar button.on { border-color:var(--accent); color:var(--accent); }
   }
-  .tab-btn {
-    padding: 10px 14px;
-    font-family: var(--font-mono);
-    font-size: 14px;
-    font-weight: 500;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--text3);
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    transition: all 0.12s;
-  }
-  .tab-btn:hover { color: var(--text2); }
-  .tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+  .track { background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; margin-bottom:12px; position:relative; }
+  .track::before { content:""; position:absolute; left:0; top:14px; height:22px; width:3px; border-radius:0 3px 3px 0; background:var(--tc); }
+  .track-head { display:flex; align-items:center; gap:10px; width:100%; padding:12px 16px; border:0; background:transparent; cursor:pointer; text-align:left; }
+  .track-head .count { margin-left:auto; font-family:var(--f-mono); font-size:13px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .track-head .chev { color:var(--muted); display:flex; transition:transform .2s; }
+  .track-head .chev.open { transform:rotate(90deg); }
+  .track-items { border-top:1px solid var(--line); padding:6px; display:grid; gap:2px; }
+  .item { display:flex; align-items:flex-start; gap:12px; width:100%; padding:9px 10px; border:0; border-radius:10px; background:transparent; cursor:pointer; text-align:left; font-size:15px; line-height:1.5; transition:background .15s; }
+  .item:hover { background:var(--surface-2); }
+  .item.done .txt { text-decoration:line-through; color:var(--muted); }
+  .cbox { width:20px; height:20px; flex:none; margin-top:1px; border-radius:6px; border:1.5px solid var(--line); display:grid; place-items:center; color:#fff; transition:background .15s,border-color .15s; }
+  .item:hover .cbox { border-color:var(--tc); }
+  .item.done .cbox { background:var(--tc); border-color:var(--tc); animation:pop .3s ease-out; }
 
-  /* Main area */
-  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  .content { flex: 1; overflow-y: auto; padding: 24px; }
+  /* overview */
+  .phases { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:12px; }
+  .phase { position:relative; display:flex; flex-direction:column; gap:10px; }
+  .phase::before { content:""; position:absolute; left:0; top:18px; height:24px; width:3px; border-radius:0 3px 3px 0; background:var(--pc); }
+  .phase .head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+  .wk-chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .wk-chip { display:inline-flex; align-items:center; gap:6px; font-size:13px; padding:5px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); cursor:pointer; text-align:left; transition:border-color .15s,transform .15s; }
+  .wk-chip:hover { border-color:var(--pc); transform:translateY(-1px); }
+  .wk-chip .n { font-family:var(--f-mono); font-size:11.5px; color:var(--pc); }
+  .wk-chip .ok { color:var(--good); display:flex; }
 
-  /* Week header */
-  .week-header {
-    padding: 14px 20px 12px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .week-meta {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 4px;
-  }
-  .phase-badge {
-    font-family: var(--font-mono);
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    padding: 2px 8px;
-    border-radius: 3px;
-    border: 1px solid;
-  }
-  .week-title-main {
-    font-family: var(--font-mono);
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text);
-    letter-spacing: -0.02em;
-  }
-  .week-goal {
-    font-size: 16px;
-    color: var(--text2);
-    font-style: italic;
-    margin-top: 3px;
-    padding-left: 2px;
-  }
+  /* heatmap */
+  .hm-scroll { overflow-x:auto; }
+  .hm { display:grid; grid-template-columns:64px repeat(26,minmax(18px,1fr)); gap:3px; min-width:720px; font-family:var(--f-mono); }
+  .hm-phase { height:20px; display:flex; align-items:center; justify-content:center; font-size:10.5px; font-weight:500; overflow:hidden; }
+  .hm-wk { font-size:11px; color:var(--muted); text-align:center; }
+  .hm-label { font-size:11.5px; font-weight:500; display:flex; align-items:center; }
+  .hm-cell { height:24px; border-radius:4px; border:0; padding:0; cursor:pointer; transition:transform .12s,box-shadow .12s; }
+  .hm-cell:hover { transform:scale(1.15); box-shadow:var(--shadow); }
+  .hm-cell.empty { background:var(--surface-2); cursor:default; }
+  .hm-cell.empty:hover { transform:none; box-shadow:none; }
+  .hm-detail { margin-top:14px; min-height:68px; }
 
-  /* Track blocks */
-  .track-block {
-    margin-bottom: 10px;
-    border-radius: 6px;
-    overflow: hidden;
-    border: 1px solid var(--border);
-  }
-  .track-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 12px;
-    cursor: pointer;
-    user-select: none;
-  }
-  .track-label-pill {
-    font-family: var(--font-mono);
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    padding: 2px 7px;
-    border-radius: 3px;
-  }
-  .track-count {
-    font-family: var(--font-mono);
-    font-size: 13px;
-    color: var(--text3);
-    margin-left: auto;
-  }
-  .track-chevron {
-    font-size: 12px;
-    color: var(--text3);
-    transition: transform 0.15s;
-  }
-  .track-chevron.open { transform: rotate(90deg); }
+  /* daily */
+  .days { display:grid; grid-template-columns:repeat(7,minmax(140px,1fr)); gap:10px; overflow-x:auto; padding-bottom:6px; }
+  .day { padding:14px; display:flex; flex-direction:column; gap:8px; }
+  .day h3 { font-size:17px; }
+  .day-block { position:relative; padding:8px 10px 8px 12px; border-radius:10px; background:var(--bg); border:1px solid var(--line); }
+  .day-block::before { content:""; position:absolute; left:0; top:8px; bottom:8px; width:3px; border-radius:0 3px 3px 0; background:var(--tc); }
+  .day-block b { display:block; font-size:14px; }
+  .day-block span { font-family:var(--f-mono); font-size:12px; color:var(--muted); }
+  .tbl { overflow-x:auto; border:1px solid var(--line); border-radius:12px; background:var(--surface); }
+  .tbl table { border-collapse:collapse; width:100%; font-size:14px; min-width:480px; }
+  .tbl th { text-align:left; font-family:var(--f-mono); font-weight:500; font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); background:var(--surface-2); padding:10px 12px; }
+  .tbl td { padding:10px 12px; border-top:1px solid var(--line); vertical-align:top; line-height:1.5; }
+  .tbl tr:hover td { background:var(--accent-soft); }
+  .tbl td:first-child { font-weight:600; white-space:nowrap; }
 
-  .track-items {
-    border-top: 1px solid var(--border);
-    padding: 6px 0;
-  }
-  .track-item {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 5px 12px;
-    font-size: 16px;
-    color: var(--text2);
-    line-height: 1.55;
-    transition: background 0.1s;
-  }
-  .track-item:hover { background: var(--bg3); color: var(--text); }
-  .item-dot {
-    width: 4px; height: 4px; border-radius: 50%;
-    flex-shrink: 0; margin-top: 6px;
-  }
+  /* milestones */
+  .tl { list-style:none; margin:0; padding:0; position:relative; }
+  .tl::before { content:""; position:absolute; left:43px; top:10px; bottom:10px; width:2px; background:var(--line); }
+  .tl li { position:relative; }
+  .tl button { display:grid; grid-template-columns:88px minmax(0,1fr); gap:14px; width:100%; padding:8px 0; border:0; background:none; cursor:pointer; text-align:left; }
+  .tl .m { font-family:var(--f-mono); font-size:12px; font-variant-numeric:tabular-nums; background:var(--surface); border:1px solid var(--line); border-radius:999px; text-align:center; padding:4px 0; height:fit-content; position:relative; z-index:1; transition:background .2s,color .2s,border-color .2s; }
+  .tl button:hover .m { background:var(--mc); color:#fff; border-color:var(--mc); }
+  .tl b { display:block; font-size:15px; }
+  .tl span { font-size:14px; color:var(--muted); }
 
-  /* Heatmap */
-  .heatmap-grid {
-    display: grid;
-    grid-template-columns: 40px repeat(26, 1fr);
-    gap: 2px;
-    font-family: var(--font-mono);
-  }
-  .hm-cell {
-    height: 20px;
-    border-radius: 2px;
-    cursor: pointer;
-    transition: opacity 0.1s, transform 0.1s;
-  }
-  .hm-cell:hover { opacity: 0.7 !important; transform: scaleY(1.2); }
-  .hm-empty { background: var(--bg2); cursor: default; }
-  .hm-empty:hover { opacity: 1 !important; transform: none; }
-  .hm-label { font-size: 13px; color: var(--text3); display: flex; align-items: center; }
-  .hm-wk-label { font-size: 13px; color: var(--text3); text-align: center; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 2px; }
-
-  /* Daily schedule */
-  .day-col {
-    background: var(--bg1);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-    flex: 1;
-    min-width: 0;
-  }
-  .day-header {
-    padding: 8px 10px 6px;
-    border-bottom: 1px solid var(--border);
-  }
-  .day-name { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--text); }
-  .day-theme { font-size: 13px; color: var(--text3); margin-top: 1px; }
-  .day-block {
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-  .day-block:last-child { border-bottom: none; }
-  .day-block-label { font-family: var(--font-mono); font-size: 14px; font-weight: 700; }
-  .day-block-mins { font-size: 13px; color: var(--text3); }
-
-  /* Milestone timeline */
-  .milestone-row {
-    display: flex;
-    gap: 12px;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border);
-    align-items: flex-start;
-  }
-  .milestone-row:last-child { border-bottom: none; }
-  .milestone-wk { font-family: var(--font-mono); font-size: 14px; color: var(--text3); min-width: 48px; padding-top: 1px; }
-  .milestone-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
-  .milestone-text { font-size: 16px; color: var(--text); line-height: 1.5; }
-
-  /* Stats bar */
-  .stats-row {
-    display: flex;
-    gap: 1px;
-    margin-bottom: 20px;
-    border-radius: 6px;
-    overflow: hidden;
-    border: 1px solid var(--border);
-  }
-  .stat-box {
-    flex: 1;
-    padding: 10px 14px;
-    background: var(--bg1);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    border-right: 1px solid var(--border);
-  }
-  .stat-box:last-child { border-right: none; }
-  .stat-num { font-family: var(--font-mono); font-size: 26px; font-weight: 700; color: var(--text); }
-  .stat-label { font-size: 14px; color: var(--text3); }
-
-  /* Legend */
-  .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 15px; color: var(--text2); }
-  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; }
-
-  /* Checked item */
-  .item-checked { text-decoration: line-through; opacity: 0.4; }
-  .check-box {
-    width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--border2);
-    flex-shrink: 0; margin-top: 3px; cursor: pointer; display: flex; align-items: center; justify-content: center;
-    transition: all 0.1s; font-size: 12px; color: white;
-  }
-  .check-box.done { background: var(--item-color, var(--border2)); border-color: var(--item-color, var(--border2)); }
-
-  /* Animations */
-  @keyframes fadeSlide {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  .fade-slide { animation: fadeSlide 0.2s ease; }
-
-  /* Scrollable sidebar weeks */
-  .sidebar-weeks { flex: 1; overflow-y: auto; }
-
-  /* Streak log */
-  .streak-card {
-    margin-bottom: 14px;
-    border: 1px solid;
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .streak-header {
-    padding: 10px 14px;
-    border-bottom: 1px solid;
-    display: flex;
-    align-items: center;
-  }
-  .streak-label {
-    font-family: var(--font-mono);
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-  }
-  .streak-stats { display: flex; gap: 20px; margin-left: auto; }
-  .streak-stat { display: flex; flex-direction: column; align-items: center; }
-  .streak-num { font-family: var(--font-mono); font-size: 22px; font-weight: 700; line-height: 1; }
-  .streak-sub { font-family: var(--font-mono); font-size: 10px; color: var(--text3); margin-top: 2px; }
-  .streak-cal { padding: 10px 14px; }
-  .streak-dow-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-bottom: 3px; }
-  .streak-dow { font-family: var(--font-mono); font-size: 9px; color: var(--text3); text-align: center; }
-  .streak-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
-  .streak-day { height: 14px; border-radius: 2px; cursor: pointer; transition: opacity 0.1s, transform 0.1s; }
-  .streak-day:hover { opacity: 0.8 !important; transform: scale(1.15); }
+  /* streaks */
+  .g2 { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+  @media (max-width:760px){ .g2 { grid-template-columns:1fr; } }
+  .streak-head { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
+  .streak-stats { display:flex; gap:20px; margin-left:auto; }
+  .stat b { display:block; font-family:var(--f-display); font-stretch:112%; font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; line-height:1.1; }
+  .stat span { font-size:12px; color:var(--muted); }
+  .cal { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+  .cal .dow { font-family:var(--f-mono); font-size:11px; color:var(--muted); text-align:center; }
+  .cal button { height:18px; border-radius:4px; border:0; padding:0; background:var(--surface-2); cursor:pointer; transition:transform .12s; }
+  .cal button:hover { transform:scale(1.15); }
+  .cal button.today { outline:1.5px solid var(--sc); outline-offset:1px; }
+  .cal button.on { background:var(--sc); }
 `;
 
 // ─── TrackBlock Component ─────────────────────────────────────────────────────
-function TrackBlock({ trackKey, items, checked, onToggle }) {
+function TrackBlock({ trackKey, items, checked, onToggle, index }) {
   const [open, setOpen] = useState(true);
   const meta = trackMeta(trackKey);
   if (!meta || !items?.length) return null;
   const doneCount = items.filter((_, i) => checked[`${trackKey}-${i}`]).length;
+  const c = tone(trackKey);
 
   return (
-    <div className="track-block" style={{ borderColor: meta.color + "22", background: meta.dimColor + "88" }}>
-      <div className="track-header" onClick={() => setOpen((o) => !o)}>
-        <span className="track-label-pill" style={{ background: meta.color + "22", color: meta.color }}>
-          {meta.label}
-        </span>
-        <span className="track-count">{doneCount}/{items.length}</span>
-        {doneCount === items.length && items.length > 0 && (
-          <span style={{ fontSize: 9, color: meta.color, fontFamily: "JetBrains Mono, monospace", marginLeft: 4 }}>✓ done</span>
+    <section className="track" style={{ "--tc": c, "--i": index }}>
+      <button className="track-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span className="pill" style={{ background: soft(c), color: c }}>{meta.label}</span>
+        {doneCount === items.length && (
+          <span className="pill" style={{ background: "var(--good-soft)", color: "var(--good)" }}><Icon n="check" s={13} />Done</span>
         )}
-        <span className={`track-chevron ${open ? "open" : ""}`}>›</span>
-      </div>
+        <span className="count">{doneCount}/{items.length}</span>
+        <span className={`chev ${open ? "open" : ""}`}><Icon n="chev" s={16} /></span>
+      </button>
       {open && (
-        <div className="track-items fade-slide">
+        <div className="track-items">
           {items.map((item, i) => {
             const ck = `${trackKey}-${i}`;
             const isDone = !!checked[ck];
             return (
-              <div key={i} className="track-item" onClick={() => onToggle(ck)}>
-                <div
-                  className={`check-box ${isDone ? "done" : ""}`}
-                  style={{ "--item-color": meta.color }}
-                >
-                  {isDone && "✓"}
-                </div>
-                <div className={`item-dot`} style={{ background: meta.color }} />
-                <span className={isDone ? "item-checked" : ""}>{item}</span>
-              </div>
+              <button key={i} className={`item ${isDone ? "done" : ""}`} role="checkbox" aria-checked={isDone} onClick={() => onToggle(ck)}>
+                <span className="cbox">{isDone && <Icon n="check" s={14} />}</span>
+                <span className="txt">{item}</span>
+              </button>
             );
           })}
         </div>
       )}
+    </section>
+  );
+}
+
+function TrackKey() {
+  return (
+    <div className="key-row">
+      {TRACKS.map((t) => (
+        <span key={t.key}><i style={{ background: tone(t.key) }} />{t.label}</span>
+      ))}
     </div>
   );
 }
@@ -435,89 +312,87 @@ function HeatmapTab({ onWeekClick }) {
   const [hovered, setHovered] = useState(null);
 
   return (
-    <div>
-      <div className="legend">
-        {TRACKS.map((t) => (
-          <div key={t.key} className="legend-item">
-            <div className="legend-swatch" style={{ background: t.color }} />
-            {t.label}
-          </div>
-        ))}
-      </div>
+    <div className="page">
+      <header className="page-head">
+        <span className="eyebrow">Load by week</span>
+        <h1>Curriculum heatmap</h1>
+        <p className="lede">Each cell is one track in one week. Darker means more items. Click a cell to open that week.</p>
+      </header>
 
-      {/* Phase labels */}
-      <div style={{ display: "grid", gridTemplateColumns: "40px repeat(26, 1fr)", gap: 2, marginBottom: 4 }}>
-        <div />
-        {Array.from({ length: 26 }, (_, i) => i + 1).map((wn) => {
-          const ph = phaseFor(wn);
-          const isStart = ph && ph.weeks[0] === wn;
-          return (
-            <div key={wn} style={{
-              height: 18,
-              background: isStart ? ph.color + "22" : (ph ? ph.color + "11" : "transparent"),
-              borderRadius: isStart ? "3px 0 0 3px" : ph?.weeks[1] === wn ? "0 3px 3px 0" : 0,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 7, color: ph?.color || "transparent", fontFamily: "JetBrains Mono, monospace",
-              fontWeight: 700, overflow: "hidden",
-            }}>
-              {isStart ? `P${ph.id}` : ""}
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="heatmap-grid">
-        {/* Header row */}
-        <div />
-        {Array.from({ length: 26 }, (_, i) => (
-          <div key={i} className="hm-wk-label">{i + 1}</div>
-        ))}
-
-        {/* Track rows */}
-        {TRACKS.map((track) => (
-          <div key={track.key} style={{ display: "contents" }}>
-            <div className="hm-label" style={{ fontSize: 8, color: track.color, fontWeight: 700 }}>
-              {track.label.slice(0, 3).toUpperCase()}
-            </div>
-            {WEEKS.map((w) => {
-              const items = w[track.key] || [];
-              const hasData = items.length > 0;
-              const opacity = hasData ? Math.min(0.3 + (items.length / 4) * 0.7, 1) : 1;
+      <div className="panel">
+        <div style={{ marginBottom: 16 }}><TrackKey /></div>
+        <div className="hm-scroll">
+          <div className="hm">
+            {/* Phase band */}
+            <div />
+            {Array.from({ length: 26 }, (_, i) => i + 1).map((wn) => {
+              const ph = phaseFor(wn);
+              const c = tone(ph?.color);
+              const isStart = ph && ph.weeks[0] === wn;
               return (
-                <div
-                  key={w.n}
-                  className={`hm-cell ${hasData ? "" : "hm-empty"}`}
-                  style={hasData ? { background: track.color, opacity } : {}}
-                  title={hasData ? `Week ${w.n} · ${track.label}: ${items[0]}` : `Week ${w.n} · ${track.label}: —`}
-                  onMouseEnter={() => setHovered({ week: w.n, track: track.key })}
-                  onMouseLeave={() => setHovered(null)}
-                  onClick={() => hasData && onWeekClick(w.n)}
-                />
+                <div key={wn} className="hm-phase" style={{
+                  background: ph ? soft(c, isStart ? 22 : 10) : "transparent",
+                  color: c,
+                  borderRadius: isStart ? "4px 0 0 4px" : ph?.weeks[1] === wn ? "0 4px 4px 0" : 0,
+                }}>
+                  {isStart ? `P${ph.id}` : ""}
+                </div>
+              );
+            })}
+
+            {/* Week numbers */}
+            <div />
+            {Array.from({ length: 26 }, (_, i) => (
+              <div key={i} className="hm-wk">{i + 1}</div>
+            ))}
+
+            {/* Track rows */}
+            {TRACKS.map((track) => {
+              const c = tone(track.key);
+              return (
+                <div key={track.key} style={{ display: "contents" }}>
+                  <div className="hm-label" style={{ color: c }}>{track.label.split(" ")[0]}</div>
+                  {WEEKS.map((w) => {
+                    const items = w[track.key] || [];
+                    const hasData = items.length > 0;
+                    const pct = Math.round(Math.min(30 + (items.length / 4) * 70, 100));
+                    return (
+                      <button
+                        key={w.n}
+                        className={`hm-cell ${hasData ? "" : "empty"}`}
+                        style={hasData ? { background: `color-mix(in srgb, ${c} ${pct}%, var(--surface))` } : undefined}
+                        title={`Week ${w.n} · ${track.label}: ${hasData ? items[0] : "—"}`}
+                        aria-label={`Week ${w.n} ${track.label}, ${items.length} items`}
+                        onMouseEnter={() => setHovered({ week: w.n, track: track.key })}
+                        onFocus={() => setHovered({ week: w.n, track: track.key })}
+                        onMouseLeave={() => setHovered(null)}
+                        onClick={() => hasData && onWeekClick(w.n)}
+                      />
+                    );
+                  })}
+                </div>
               );
             })}
           </div>
-        ))}
+        </div>
       </div>
 
-      {hovered && (
-        <div style={{
-          marginTop: 16, padding: "10px 14px", background: "var(--bg1)", border: "1px solid var(--border2)",
-          borderRadius: 6, fontSize: 12, color: "var(--text2)", fontFamily: "JetBrains Mono, monospace"
-        }}>
-          {(() => {
-            const w = WEEKS[hovered.week - 1];
-            const items = w[hovered.track] || [];
-            const t = trackMeta(hovered.track);
-            return (
-              <>
-                <span style={{ color: t.color }}>{t.label}</span>
-                <span style={{ color: "var(--text3)" }}> · Week {hovered.week} · {w.title}</span>
-                {items.length > 0 && <div style={{ marginTop: 4, color: "var(--text)" }}>{items[0]}</div>}
-              </>
-            );
-          })()}
-        </div>
-      )}
+      <div className="panel hm-detail">
+        {hovered ? (() => {
+          const w = WEEKS[hovered.week - 1];
+          const items = w[hovered.track] || [];
+          const t = trackMeta(hovered.track);
+          return (
+            <>
+              <div className="crumbs">
+                <span className="pill" style={{ background: soft(tone(t.key)), color: tone(t.key) }}>{t.label}</span>
+                <span className="eyebrow">Week {hovered.week} · {w.title}</span>
+              </div>
+              <div style={{ marginTop: 6 }}>{items.length > 0 ? items[0] : <span className="muted">Nothing scheduled for this track.</span>}</div>
+            </>
+          );
+        })() : <span className="muted">Hover a cell to preview what's scheduled.</span>}
+      </div>
     </div>
   );
 }
@@ -525,60 +400,63 @@ function HeatmapTab({ onWeekClick }) {
 // ─── Daily Schedule Tab ───────────────────────────────────────────────────────
 function DailyTab() {
   return (
-    <div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-        {TRACKS.map((t) => {
+    <div className="page">
+      <header className="page-head">
+        <span className="eyebrow">Weekly rhythm</span>
+        <h1>Daily split</h1>
+        <p className="lede">How each day of the week is spent, and the hours every track gets.</p>
+      </header>
+
+      <div className="stats stagger">
+        {TRACKS.map((t, i) => {
           const wkHours = DAILY_BLOCKS.reduce((sum, day) => {
             return sum + day.blocks.filter((b) => b.track === t.key).reduce((s, b) => s + b.mins, 0);
           }, 0) / 60;
           return (
-            <div key={t.key} style={{
-              background: t.dimColor, border: `1px solid ${t.color}33`, borderRadius: 5,
-              padding: "5px 10px", textAlign: "center", minWidth: 70,
-            }}>
-              <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 14, fontWeight: 700, color: t.color }}>
-                {wkHours.toFixed(1)}h
-              </div>
-              <div style={{ fontSize: 9, color: t.textColor, opacity: 0.7 }}>{t.label}/wk</div>
+            <div key={t.key} style={{ "--i": i }}>
+              <b style={{ color: tone(t.key) }}>{wkHours.toFixed(1)}h</b>
+              <span>{t.label} / week</span>
             </div>
           );
         })}
       </div>
-      <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8 }}>
-        {DAILY_BLOCKS.map((day) => (
-          <div key={day.day} className="day-col">
-            <div className="day-header">
-              <div className="day-name">{day.day}</div>
-              <div className="day-theme">{day.theme}</div>
+
+      <div className="sec-head"><h2>The week</h2></div>
+      <div className="days stagger">
+        {DAILY_BLOCKS.map((day, i) => (
+          <div key={day.day} className="panel day" style={{ "--i": i }}>
+            <div>
+              <h3>{day.day}</h3>
+              <span className="eyebrow" style={{ fontSize: 11 }}>{day.theme}</span>
             </div>
-            {day.blocks.map((b, i) => {
-              const t = trackMeta(b.track);
-              return (
-                <div key={i} className="day-block" style={{ background: t.dimColor }}>
-                  <div className="day-block-label" style={{ color: t.color }}>{b.label}</div>
-                  <div className="day-block-mins">{b.mins} min</div>
-                </div>
-              );
-            })}
+            {day.blocks.map((b, j) => (
+              <div key={j} className="day-block" style={{ "--tc": tone(b.track) }}>
+                <b>{b.label}</b>
+                <span>{b.mins} min</span>
+              </div>
+            ))}
           </div>
         ))}
       </div>
-      <div style={{ marginTop: 16, padding: "12px 14px", background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 6 }}>
-        <div style={{ fontSize: 10, color: "var(--text3)", fontFamily: "JetBrains Mono, monospace", marginBottom: 8, letterSpacing: "0.1em" }}>EXECUTION RULES</div>
-        {[
-          ["DSA blocks", "Always timed. 25 min per problem. No peeking before the timer ends."],
-          ["DP blocks", "Write the recurrence on paper first. Never start coding before defining state."],
-          ["Sys Design", "Whiteboard or paper first. No keyboard until you have the full diagram sketched."],
-          ["FSD blocks", "No passive reading. Every session ends with code written or a diagram drawn."],
-          ["Breaks", "Non-negotiable. 30 min after each major block. No screens."],
-          ["Saturday", "Treat as a real interview loop. Camera on, timer running, no pausing."],
-          ["Error log", "Every failed problem → root cause in one sentence. Review every Sunday."],
-        ].map(([title, rule]) => (
-          <div key={title} style={{ display: "flex", gap: 12, padding: "6px 0", borderBottom: "1px solid var(--border)" }}>
-            <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 10, color: "var(--accent)", minWidth: 100, flexShrink: 0 }}>{title}</div>
-            <div style={{ fontSize: 11, color: "var(--text2)" }}>{rule}</div>
-          </div>
-        ))}
+
+      <div className="sec-head"><h2>Execution rules</h2></div>
+      <div className="tbl">
+        <table>
+          <thead><tr><th>Block</th><th>Rule</th></tr></thead>
+          <tbody>
+            {[
+              ["DSA blocks", "Always timed. 25 min per problem. No peeking before the timer ends."],
+              ["DP blocks", "Write the recurrence on paper first. Never start coding before defining state."],
+              ["Sys Design", "Whiteboard or paper first. No keyboard until you have the full diagram sketched."],
+              ["FSD blocks", "No passive reading. Every session ends with code written or a diagram drawn."],
+              ["Breaks", "Non-negotiable. 30 min after each major block. No screens."],
+              ["Saturday", "Treat as a real interview loop. Camera on, timer running, no pausing."],
+              ["Error log", "Every failed problem → root cause in one sentence. Review every Sunday."],
+            ].map(([title, rule]) => (
+              <tr key={title}><td>{title}</td><td>{rule}</td></tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -587,21 +465,36 @@ function DailyTab() {
 // ─── Milestones Tab ───────────────────────────────────────────────────────────
 function MilestonesTab({ onWeekClick }) {
   return (
-    <div>
-      {MILESTONES.map((m, i) => (
-        <div key={i} className="milestone-row" style={{ cursor: "pointer" }} onClick={() => onWeekClick(m.week)}>
-          <div className="milestone-wk">Wk {m.week}</div>
-          <div className="milestone-dot" style={{ background: m.color }} />
-          <div className="milestone-text">{m.text}</div>
-        </div>
-      ))}
+    <div className="page">
+      <header className="page-head">
+        <span className="eyebrow">Checkpoints</span>
+        <h1>Milestones</h1>
+        <p className="lede">The outcomes each stretch of the plan should land. Click one to open its week.</p>
+      </header>
+      <ol className="tl stagger">
+        {MILESTONES.map((m, i) => {
+          const ph = phaseFor(m.week);
+          return (
+            <li key={i} style={{ "--i": i, "--mc": tone(m.color) }}>
+              <button onClick={() => onWeekClick(m.week)}>
+                <span className="m" style={{ borderColor: tone(m.color), color: tone(m.color) }}>Wk {m.week}</span>
+                <span>
+                  <b style={{ color: "var(--ink)" }}>{m.text}</b>
+                  {ph && <span>{ph.label} · {ph.name}</span>}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }
 
 // ─── Week View ────────────────────────────────────────────────────────────────
-function WeekView({ week, checked, onToggle }) {
+function WeekView({ week, checked, onToggle, onWeekClick, onOpenProblem }) {
   const ph = phaseFor(week.n);
+  const pc = tone(ph?.color);
   const activeTracks = TRACKS.filter((t) => (week[t.key] || []).length > 0);
   const totalItems = activeTracks.reduce((s, t) => s + (week[t.key] || []).length, 0);
   const doneItems = activeTracks.reduce((s, t) => {
@@ -610,31 +503,55 @@ function WeekView({ week, checked, onToggle }) {
   const progress = totalItems > 0 ? (doneItems / totalItems) * 100 : 0;
 
   return (
-    <div className="fade-slide">
-      {/* Progress bar */}
-      <div style={{ height: 2, background: "var(--border)", borderRadius: 1, marginBottom: 20, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${progress}%`, background: ph?.color || "var(--accent)", borderRadius: 1, transition: "width 0.3s" }} />
+    <div className="page">
+      <div className="chipbar" aria-label="Weeks">
+        {WEEKS.map((w) => (
+          <button key={w.n} className={w.n === week.n ? "on" : ""} onClick={() => onWeekClick(w.n)}>W{w.n}</button>
+        ))}
       </div>
 
-      {activeTracks.map((t) => (
-        <TrackBlock
-          key={t.key}
-          trackKey={t.key}
-          items={week[t.key] || []}
-          checked={checked}
-          onToggle={onToggle}
-        />
-      ))}
+      <header className="page-head" style={{ marginBottom: 0 }}>
+        <div className="crumbs">
+          {ph && <span className="pill" style={{ background: soft(pc), color: pc }}>{ph.label} · {ph.name}</span>}
+          <span className="eyebrow">Week {week.n} of 26</span>
+        </div>
+        <h1>{week.title}</h1>
+        {week.goal && <p className="lede">{week.goal}</p>}
+      </header>
 
-      {/* Week goal callout */}
+      <div className="week-bar">
+        <div className="meter" role="progressbar" aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100}>
+          <i style={{ width: `${progress}%` }} />
+        </div>
+        <span className="mono small muted" style={{ fontSize: 13 }}>{doneItems}/{totalItems} done</span>
+        <div className="nav-btns">
+          <button className="btn" disabled={week.n <= 1} onClick={() => onWeekClick(week.n - 1)}><Icon n="back" s={16} />Prev</button>
+          <button className="btn" disabled={week.n >= 26} onClick={() => onWeekClick(week.n + 1)}>Next<Icon n="arrow" s={16} /></button>
+        </div>
+      </div>
+
+      <div className="stagger">
+        {activeTracks.map((t, i) => (
+          <TrackBlock
+            key={t.key}
+            index={i}
+            trackKey={t.key}
+            items={week[t.key] || []}
+            checked={checked}
+            onToggle={onToggle}
+          />
+        ))}
+      </div>
+
+      <Suspense fallback={null}>
+        <WeekLeetCode week={week.n} onOpen={onOpenProblem} />
+        <WeekPractice week={week.n} onOpen={onOpenProblem} />
+      </Suspense>
+
       {week.goal && (
-        <div style={{
-          marginTop: 16, padding: "10px 14px", background: "var(--bg2)",
-          borderLeft: `3px solid ${ph?.color || "var(--accent)"}`,
-          borderRadius: "0 6px 6px 0", fontSize: 12, color: "var(--text2)", lineHeight: 1.6,
-        }}>
-          <span style={{ color: ph?.color || "var(--accent)", fontWeight: 600, fontFamily: "JetBrains Mono, monospace", fontSize: 10 }}>GOAL </span>
-          {week.goal}
+        <div className="callout" style={{ marginTop: 16 }}>
+          <span className="ct">Goal this week</span>
+          <span>{week.goal}</span>
         </div>
       )}
     </div>
@@ -642,54 +559,58 @@ function WeekView({ week, checked, onToggle }) {
 }
 
 // ─── Overview Tab ─────────────────────────────────────────────────────────────
-function OverviewTab({ onWeekClick }) {
+function OverviewTab({ onWeekClick, checked }) {
+  const weekDone = (w) => {
+    const total = TRACKS.reduce((s, t) => s + (w[t.key] || []).length, 0);
+    const done = TRACKS.reduce((s, t) => s + (w[t.key] || []).filter((_, i) => checked[`w${w.n}-${t.key}-${i}`]).length, 0);
+    return { total, done };
+  };
+
   return (
-    <div>
-      <div className="stats-row">
-        {[["26", "Total Weeks"], ["500+", "DSA Problems"], ["40+", "Systems"], ["8", "STAR Stories"]].map(([n, l]) => (
-          <div key={l} className="stat-box">
-            <div className="stat-num">{n}</div>
-            <div className="stat-label">{l}</div>
-          </div>
+    <div className="page">
+      <header className="page-head">
+        <span className="eyebrow">26-week curriculum</span>
+        <h1>Six phases. <em>One offer.</em></h1>
+        <p className="lede">Foundations, pattern mastery, system design depth, full-stack, then interview execution — overlapping so no track goes cold.</p>
+      </header>
+
+      <div className="stats stagger">
+        {[["26", "Total weeks"], ["500+", "DSA problems"], ["40+", "Systems"], ["8", "STAR stories"]].map(([n, l], i) => (
+          <div key={l} style={{ "--i": i }}><b>{n}</b><span>{l}</span></div>
         ))}
       </div>
 
-      {PHASES.map((ph) => (
-        <div key={ph.id} style={{
-          marginBottom: 10, background: ph.bg + "CC", border: `1px solid ${ph.border}`,
-          borderRadius: 6, overflow: "hidden",
-        }}>
-          <div style={{
-            padding: "10px 14px", display: "flex", alignItems: "center", gap: 10,
-            borderBottom: `1px solid ${ph.border}`,
-          }}>
-            <span style={{
-              fontFamily: "JetBrains Mono, monospace", fontSize: 9, fontWeight: 700,
-              color: ph.color, letterSpacing: "0.1em",
-            }}>
-              {ph.label.toUpperCase()}
-            </span>
-            <span style={{ fontWeight: 600, color: "var(--text)", fontSize: 13 }}>{ph.name}</span>
-            <span style={{ marginLeft: "auto", fontFamily: "JetBrains Mono, monospace", fontSize: 10, color: "var(--text3)" }}>
-              Wk {ph.weeks[0]}–{ph.weeks[1]}
-            </span>
-          </div>
-          <div style={{ padding: "8px 14px", display: "flex", flexWrap: "wrap", gap: 4 }}>
-            {WEEKS.filter((w) => w.n >= ph.weeks[0] && w.n <= ph.weeks[1]).map((w) => (
-              <button key={w.n} onClick={() => onWeekClick(w.n)} style={{
-                background: "transparent", border: `1px solid ${ph.color}44`, borderRadius: 4,
-                padding: "3px 8px", cursor: "pointer", fontFamily: "JetBrains Mono, monospace",
-                fontSize: 10, color: ph.color, transition: "all 0.1s",
-              }}
-                onMouseOver={(e) => { e.target.style.background = ph.color + "22"; }}
-                onMouseOut={(e) => { e.target.style.background = "transparent"; }}
-              >
-                W{w.n} {w.title}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
+      <div className="sec-head"><h2>Phases</h2></div>
+      <div className="phases stagger">
+        {PHASES.map((ph, i) => {
+          const pc = tone(ph.color);
+          const weeks = WEEKS.filter((w) => w.n >= ph.weeks[0] && w.n <= ph.weeks[1]);
+          const agg = weeks.reduce((a, w) => { const d = weekDone(w); return { total: a.total + d.total, done: a.done + d.done }; }, { total: 0, done: 0 });
+          return (
+            <div key={ph.id} className="panel phase" style={{ "--pc": pc, "--i": i }}>
+              <div className="head">
+                <div>
+                  <span className="eyebrow" style={{ color: pc }}>{ph.label}</span>
+                  <h3>{ph.name}</h3>
+                </div>
+                <span className="mono muted" style={{ fontSize: 12 }}>Wk {ph.weeks[0]}–{ph.weeks[1]}</span>
+              </div>
+              <div className="meter"><i style={{ width: `${agg.total ? (agg.done / agg.total) * 100 : 0}%`, background: pc }} /></div>
+              <div className="wk-chips">
+                {weeks.map((w) => {
+                  const d = weekDone(w);
+                  return (
+                    <button key={w.n} className="wk-chip" onClick={() => onWeekClick(w.n)}>
+                      <span className="n">W{w.n}</span>{w.title}
+                      {d.total > 0 && d.done === d.total && <span className="ok"><Icon n="check" s={13} /></span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -725,10 +646,10 @@ function computeStreak(dateSet) {
 }
 
 const STREAK_TRACKS = [
-  { key: "dsa", label: "DSA",        color: "#22D3EE", dimColor: "#0C2A33" },
-  { key: "dp",  label: "DP",         color: "#A78BFA", dimColor: "#1C1033" },
-  { key: "sd",  label: "Sys Design", color: "#34D399", dimColor: "#0A2014" },
-  { key: "fsd", label: "Full-Stack", color: "#FB923C", dimColor: "#1E0A00" },
+  { key: "dsa", label: "DSA" },
+  { key: "dp",  label: "DP" },
+  { key: "sd",  label: "Sys Design" },
+  { key: "fsd", label: "Full-Stack" },
 ];
 
 // ─── Streak Tab ───────────────────────────────────────────────────────────────
@@ -740,66 +661,70 @@ function StreakTab({ streaks, onToggle }) {
   const startDow = new Date(fy, fm - 1, fd).getDay();
 
   return (
-    <div className="fade-slide">
-      <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text3)", letterSpacing: "0.15em", marginBottom: 16 }}>
-        STREAK LOG — click a day to mark it complete
-      </div>
-      {STREAK_TRACKS.map((track) => {
-        const dateSet = new Set(Object.keys(streaks[track.key] || {}).filter((k) => streaks[track.key][k]));
-        const { current, longest } = computeStreak(dateSet);
-        return (
-          <div key={track.key} className="streak-card" style={{ borderColor: track.color + "33", background: track.dimColor }}>
-            <div className="streak-header" style={{ borderBottomColor: track.color + "22" }}>
-              <span className="streak-label" style={{ color: track.color }}>{track.label}</span>
-              <div className="streak-stats">
-                <div className="streak-stat">
-                  <span className="streak-num" style={{ color: track.color }}>{current}</span>
-                  <span className="streak-sub">CURRENT</span>
-                </div>
-                <div className="streak-stat">
-                  <span className="streak-num" style={{ color: "var(--text2)" }}>{longest}</span>
-                  <span className="streak-sub">LONGEST</span>
+    <div className="page">
+      <header className="page-head">
+        <span className="eyebrow">Last 90 days</span>
+        <h1>Streak log</h1>
+        <p className="lede">Click a day to mark that track done. Saved in this browser.</p>
+      </header>
+      <div className="g2 stagger">
+        {STREAK_TRACKS.map((track, i) => {
+          const sc = tone(track.key);
+          const dateSet = new Set(Object.keys(streaks[track.key] || {}).filter((k) => streaks[track.key][k]));
+          const { current, longest } = computeStreak(dateSet);
+          return (
+            <div key={track.key} className="panel" style={{ "--sc": sc, "--i": i }}>
+              <div className="streak-head">
+                <span className="pill" style={{ background: soft(sc), color: sc }}>{track.label}</span>
+                <div className="streak-stats">
+                  <div className="stat"><b style={{ color: sc }}>{current}</b><span>Current</span></div>
+                  <div className="stat"><b>{longest}</b><span>Longest</span></div>
                 </div>
               </div>
-            </div>
-            <div className="streak-cal">
-              <div className="streak-dow-row">
-                {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
-                  <div key={i} className="streak-dow">{d}</div>
+              <div className="cal">
+                {["S", "M", "T", "W", "T", "F", "S"].map((d, j) => (
+                  <div key={j} className="dow">{d}</div>
                 ))}
-              </div>
-              <div className="streak-grid">
-                {Array.from({ length: startDow }, (_, i) => <div key={`p${i}`} />)}
+                {Array.from({ length: startDow }, (_, j) => <div key={`p${j}`} />)}
                 {days.map((ds) => {
                   const done = dateSet.has(ds);
-                  const isToday = ds === today;
                   return (
-                    <div
+                    <button
                       key={ds}
                       title={ds}
+                      aria-label={`${track.label} ${ds}${done ? ", done" : ""}`}
+                      aria-pressed={done}
                       onClick={() => onToggle(track.key, ds)}
-                      className="streak-day"
-                      style={{
-                        background: done ? track.color : "var(--bg3)",
-                        border: isToday ? `1px solid ${track.color}` : "1px solid transparent",
-                        opacity: done ? 1 : 0.45,
-                      }}
+                      className={`${done ? "on" : ""} ${ds === today ? "today" : ""}`}
                     />
                   );
                 })}
               </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }
 
 // ─── Root App ─────────────────────────────────────────────────────────────────
+// Practice views keep a hash (#practice, #p/<id>) so a refresh lands back on the same problem.
+function initialRoute() {
+  const h = window.location.hash;
+  if (h.startsWith("#p/")) return { tab: "problem", problem: decodeURIComponent(h.slice(3)) };
+  if (h === "#practice") return { tab: "practice", problem: null };
+  if (h.startsWith("#lists")) return { tab: "lists", problem: null, list: h.slice(7) || "neetcode150" };
+  return { tab: "week", problem: null };
+}
+
 export default function App() {
   const [activeWeek, setActiveWeek] = useState(1);
-  const [activeTab, setActiveTab] = useState("week");
+  const [activeTab, setActiveTab] = useState(() => initialRoute().tab);
+  const [activeProblem, setActiveProblem] = useState(() => initialRoute().problem);
+  const [activeList, setActiveList] = useState(() => initialRoute().list || "neetcode150");
+  const practice = usePractice();
+  const due = dueCount(practice);
   const [checked, setChecked] = useState({});
   const [streaks, setStreaks] = useState(() => {
     try { return JSON.parse(localStorage.getItem("faang-streaks") || "{}"); } catch { return {}; }
@@ -808,6 +733,30 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("faang-streaks", JSON.stringify(streaks));
   }, [streaks]);
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+    const hash = activeTab === "problem" ? `#p/${encodeURIComponent(activeProblem)}` : activeTab === "practice" ? "#practice" : activeTab === "lists" ? `#lists/${activeList}` : "";
+    if (hash !== window.location.hash) window.history.pushState(null, "", hash || window.location.pathname);
+  }, [activeTab, activeWeek, activeProblem, activeList]);
+
+  // Back/forward and hand-edited hashes.
+  useEffect(() => {
+    const sync = () => {
+      const r = initialRoute();
+      if (r.tab === "week") {
+        // Left the practice area: back to the week plan (other tabs aren't in the URL).
+        setActiveTab((t) => (t === "practice" || t === "problem" || t === "lists" ? "week" : t));
+        return;
+      }
+      setActiveTab(r.tab);
+      setActiveProblem(r.problem);
+      if (r.list) setActiveList(r.list);
+    };
+    window.addEventListener("popstate", sync);
+    window.addEventListener("hashchange", sync);
+    return () => { window.removeEventListener("popstate", sync); window.removeEventListener("hashchange", sync); };
+  }, []);
 
   const handleToggle = useCallback((key) => {
     setChecked((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -825,54 +774,62 @@ export default function App() {
     setActiveTab("week");
   };
 
+  const openProblem = (id) => {
+    setActiveProblem(id);
+    setActiveTab("problem");
+  };
+
   const currentWeek = WEEKS[activeWeek - 1];
-  const currentPhase = phaseFor(activeWeek);
 
   // Progress across all weeks
   const totalAll = WEEKS.reduce((s, w) => s + TRACKS.reduce((ts, t) => ts + (w[t.key] || []).length, 0), 0);
   const doneAll = Object.values(checked).filter(Boolean).length;
+  const weekComplete = (w) => {
+    const total = TRACKS.reduce((s, t) => s + (w[t.key] || []).length, 0);
+    return total > 0 && TRACKS.every((t) => (w[t.key] || []).every((_, i) => checked[`w${w.n}-${t.key}-${i}`]));
+  };
 
   return (
     <>
       <style>{GLOBAL_CSS}</style>
-      <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden" }}>
+      <div className="trk">
 
-        {/* ─── Sidebar ──────────────────────────────── */}
-        <aside className="sidebar">
-          <div className="sidebar-logo">
-            <h1>FAANG Prep</h1>
-            <p>26-Week Tracker</p>
-            {/* Global progress */}
-            <div style={{ marginTop: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                <span style={{ fontSize: 9, color: "var(--text3)", fontFamily: "JetBrains Mono, monospace" }}>OVERALL</span>
-                <span style={{ fontSize: 9, color: "var(--accent)", fontFamily: "JetBrains Mono, monospace" }}>
-                  {doneAll}/{totalAll}
-                </span>
-              </div>
-              <div style={{ height: 3, background: "var(--border)", borderRadius: 2, overflow: "hidden" }}>
-                <div style={{
-                  height: "100%", width: `${(doneAll / totalAll) * 100}%`,
-                  background: "var(--accent)", borderRadius: 2, transition: "width 0.3s",
-                }} />
-              </div>
-            </div>
+        {/* ─── Rail (desktop) ───────────────────────── */}
+        <aside className="rail">
+          <button className="brand" onClick={() => setActiveTab("overview")}>
+            <Mark />
+            <span className="brand-name">FAANG Prep<small>26-week tracker</small></span>
+          </button>
+          <a className="atlas-link" href="/atlas">
+            <Icon n="map" s={16} />System Design Atlas<Icon n="arrow" s={15} />
+          </a>
+          <div className="rail-progress">
+            <div className="row"><span className="eyebrow" style={{ fontSize: 11 }}>Overall</span><span className="mono" style={{ color: "var(--accent)" }}>{doneAll}/{totalAll}</span></div>
+            <div className="meter" style={{ marginTop: 6 }}><i style={{ width: `${(doneAll / totalAll) * 100}%` }} /></div>
           </div>
 
-          <nav className="sidebar-nav">
+          <nav className="nav">
+            <div className="nav-group">
+              <span className="eyebrow">Views</span>
+              {VIEWS.filter((v) => v.key !== "week").map((v) => (
+                <button key={v.key} className={`nav-item ${activeTab === v.key || (v.key === "practice" && activeTab === "problem") ? "on" : ""}`} onClick={() => setActiveTab(v.key)}>
+                  <Icon n={v.icon} s={17} />{v.label}
+                  {v.key === "practice" && due > 0 && <span className="badge" title={`${due} due for revision`}>{due}</span>}
+                </button>
+              ))}
+            </div>
             {PHASES.map((ph) => (
-              <div key={ph.id}>
-                <div className="nav-section" style={{ color: ph.color + "99" }}>{ph.label} — {ph.name}</div>
+              <div key={ph.id} className="nav-group">
+                <span className="eyebrow"><i style={{ background: tone(ph.color) }} />{ph.label} · {ph.name}</span>
                 {WEEKS.filter((w) => w.n >= ph.weeks[0] && w.n <= ph.weeks[1]).map((w) => (
                   <button
                     key={w.n}
-                    className={`nav-item ${activeWeek === w.n && activeTab === "week" ? "active" : ""}`}
-                    style={{ "--item-color": ph.color }}
+                    className={`nav-item ${activeWeek === w.n && activeTab === "week" ? "on" : ""}`}
                     onClick={() => goToWeek(w.n)}
                   >
-                    <span className="week-num">W{w.n}</span>
-                    <span className="week-dot" style={{ background: activeWeek === w.n && activeTab === "week" ? ph.color : "var(--border2)" }} />
-                    <span className="week-title">{w.title}</span>
+                    <span className="num">{String(w.n).padStart(2, "0")}</span>
+                    <span className="t">{w.title}</span>
+                    {weekComplete(w) && <span className="tick"><Icon n="check" s={14} /></span>}
                   </button>
                 ))}
               </div>
@@ -881,73 +838,18 @@ export default function App() {
         </aside>
 
         {/* ─── Main ─────────────────────────────────── */}
-        <div className="main">
-          {/* Week header */}
-          {activeTab === "week" && (
-            <div className="week-header">
-              <div className="week-meta">
-                {currentPhase && (
-                  <span className="phase-badge" style={{
-                    color: currentPhase.color,
-                    background: currentPhase.bg,
-                    borderColor: currentPhase.border,
-                  }}>
-                    {currentPhase.label}
-                  </span>
-                )}
-                <span style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 10, color: "var(--text3)" }}>
-                  Week {activeWeek} of 26
-                </span>
-                {/* Nav arrows */}
-                <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
-                  {activeWeek > 1 && (
-                    <button onClick={() => setActiveWeek((n) => n - 1)} style={{
-                      background: "var(--bg2)", border: "1px solid var(--border2)", borderRadius: 4,
-                      color: "var(--text2)", cursor: "pointer", padding: "3px 8px",
-                      fontFamily: "JetBrains Mono, monospace", fontSize: 11,
-                    }}>← Prev</button>
-                  )}
-                  {activeWeek < 26 && (
-                    <button onClick={() => setActiveWeek((n) => n + 1)} style={{
-                      background: "var(--bg2)", border: "1px solid var(--border2)", borderRadius: 4,
-                      color: "var(--text2)", cursor: "pointer", padding: "3px 8px",
-                      fontFamily: "JetBrains Mono, monospace", fontSize: 11,
-                    }}>Next →</button>
-                  )}
-                </div>
-              </div>
-              <div className="week-title-main" style={{ color: currentPhase?.color || "var(--text)" }}>
-                {currentWeek?.title}
-              </div>
-              {currentWeek?.goal && <div className="week-goal">"{currentWeek.goal}"</div>}
-            </div>
-          )}
-
-          {/* Tabs */}
-          <div className="tab-bar">
-            {[
-              { key: "week",       label: "Week Plan" },
-              { key: "overview",   label: "Overview" },
-              { key: "heatmap",    label: "Heatmap" },
-              { key: "daily",      label: "Daily Split" },
-              { key: "milestones", label: "Milestones" },
-              { key: "streaks",    label: "Streaks" },
-            ].map((t) => (
-              <button
-                key={t.key}
-                className={`tab-btn ${activeTab === t.key ? "active" : ""}`}
-                onClick={() => setActiveTab(t.key)}
-              >
-                {t.label}
-              </button>
-            ))}
+        <main className="main">
+          <div className="topbar">
+            <button className="brand" onClick={() => setActiveTab("overview")}><Mark /><span className="brand-name">FAANG Prep</span></button>
+            <a className="atlas-link" href="/atlas"><Icon n="map" s={15} />Atlas</a>
           </div>
 
-          {/* Content */}
-          <div className="content">
+          <div
+            className={`wrap ${activeTab === "problem" ? "wide" : ""}`}
+            key={activeTab + (activeTab === "week" ? activeWeek : activeTab === "problem" ? activeProblem : "")}
+          >
             {activeTab === "week" && (
               <WeekView
-                key={activeWeek}
                 week={currentWeek}
                 checked={
                   // Scope checked state per week
@@ -958,15 +860,35 @@ export default function App() {
                   )
                 }
                 onToggle={(key) => handleToggle(`w${activeWeek}-${key}`)}
+                onWeekClick={goToWeek}
+                onOpenProblem={openProblem}
               />
             )}
-            {activeTab === "overview" && <OverviewTab onWeekClick={goToWeek} />}
+            {activeTab === "overview" && <OverviewTab onWeekClick={goToWeek} checked={checked} />}
             {activeTab === "heatmap" && <HeatmapTab onWeekClick={goToWeek} />}
             {activeTab === "daily" && <DailyTab />}
             {activeTab === "milestones" && <MilestonesTab onWeekClick={goToWeek} />}
             {activeTab === "streaks" && <StreakTab streaks={streaks} onToggle={handleStreakToggle} />}
+            {(activeTab === "practice" || activeTab === "problem" || activeTab === "lists") && (
+              <Suspense fallback={<div className="muted mono" style={{ fontSize: 13 }}>Loading practice…</div>}>
+                {activeTab === "practice"
+                  ? <Practice onOpen={openProblem} onLists={(k) => { setActiveList(k); setActiveTab("lists"); }} />
+                  : activeTab === "lists"
+                  ? <LeetCodeLists list={activeList} onList={setActiveList} onOpen={openProblem} onWeek={goToWeek} />
+                  : <ProblemPage id={activeProblem} onOpen={openProblem} onBack={() => setActiveTab("practice")} onWeek={goToWeek} />}
+              </Suspense>
+            )}
           </div>
-        </div>
+        </main>
+
+        {/* ─── Dock (phone) ─────────────────────────── */}
+        <nav className="dock" aria-label="Main">
+          {VIEWS.filter((v) => v.dock !== false).map((v) => (
+            <button key={v.key} className={activeTab === v.key || (v.key === "practice" && activeTab === "problem") ? "on" : ""} onClick={() => setActiveTab(v.key)}>
+              <Icon n={v.icon} s={21} />{v.short}
+            </button>
+          ))}
+        </nav>
       </div>
     </>
   );
