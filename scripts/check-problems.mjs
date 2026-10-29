@@ -105,6 +105,23 @@ if (bl !== 75) lcFail(`Blind 75 has ${bl} problems`);
 const titles = new Map();
 for (const [n, sig] of seen) { const t = sig.split("|")[0]; if (titles.has(t)) lcFail(`"${t}" used for #${titles.get(t)} and #${n}`); titles.set(t, n); }
 console.log(`LeetCode lists: ${seen.size} distinct problems, NeetCode 150 = ${nc}, Blind 75 = ${bl}.`);
+const { DAILY } = await import("../src/data/daily.js");
+let dailyNew = 0, dailyRepeat = 0;
+const introduced = new Set();
+for (const [w, plan] of Object.entries(DAILY)) {
+  if (plan.days.length !== 7) lcFail(`daily week ${w}: needs 7 days, has ${plan.days.length}`);
+  plan.days.forEach((d, i) => {
+    if (!d) return;
+    if (!d.topic) lcFail(`daily week ${w} day ${i + 1}: missing topic`);
+    if (d.items.length < 1 || d.items.length > 2) lcFail(`daily week ${w} day ${i + 1}: ${d.items.length} problems (keep it to 1–2)`);
+    checkItems(`daily week ${w} day ${i + 1}`, [{ items: d.items }]);
+    for (const it of d.items) {
+      if (d.repeat) { dailyRepeat++; if (!introduced.has(it[0])) lcFail(`daily week ${w} day ${i + 1}: re-solve of #${it[0]} before it was introduced`); }
+      else { dailyNew++; if (introduced.has(it[0])) lcFail(`daily week ${w}: #${it[0]} introduced twice`); introduced.add(it[0]); }
+    }
+  });
+}
+console.log(`Daily track: ${dailyNew} new problems + ${dailyRepeat} re-solves across ${Object.keys(DAILY).length} weeks.`);
 
 console.log(failures ? `\n${failures} problem(s) found across ${selected.length} problems.` : `✓ ${selected.length} problems: all reference solutions pass in JS and Python.`);
 process.exit(failures ? 1 : 0);

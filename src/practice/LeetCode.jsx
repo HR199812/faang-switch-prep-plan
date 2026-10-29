@@ -2,6 +2,7 @@ import { useState } from "react";
 import { WEEKS } from "../data/weeks.js";
 import { LEETCODE, lcSlug, lcUrl } from "../data/leetcode.js";
 import { NEETCODE_150, BLIND_75 } from "../data/lists.js";
+import { WEEK_SCHEDULE, isDpGroup, estimate, weekTheme } from "../data/schedule.js";
 import { PROBLEMS } from "./problems.js";
 import { useLeetCode, toggleLeetCode, usePractice } from "./store.js";
 
@@ -49,27 +50,115 @@ const countSolved = (groups, lc) => {
 };
 
 // ─── Week page panel ─────────────────────────────────────────────────────────
+const todayIdx = () => (new Date().getDay() + 6) % 7; // Mon = 0
+const allItems = (sessions) => sessions.flatMap((s) => s.groups.flatMap((g) => g.items));
+const diffMix = (items) => ["E", "M", "H"].map((d) => [d, items.filter((it) => it[2] === d).length]).filter(([, n]) => n);
+
+function DayBreakdown({ day, lc }) {
+  const items = allItems(day.sessions);
+  const done = items.filter((it) => lc[lcSlug(it)]).length;
+  const mins = estimate(items);
+  const patterns = [...new Set(day.sessions.flatMap((s) => s.groups.map((g) => g.topic)))];
+  return (
+    <div className="lc-breakdown">
+      <div><b>{day.day}</b><span className="muted small">{patterns.join(" · ") || "Rest day"}</span></div>
+      <div className="lc-bd-stats">
+        <span><b>{items.length}</b> problem{items.length === 1 ? "" : "s"}</span>
+        {mins > 0 && <span>~<b>{mins}</b> min</span>}
+        <span><b>{done}</b>/{items.length} solved</span>
+        <span className="lc-mix">{diffMix(items).map(([d, n]) => <i key={d} className={`diff-${DIFF[d]}`}>{n} {DIFF[d]}</i>)}</span>
+      </div>
+    </div>
+  );
+}
+
+function WeekOverview({ week, days, lc }) {
+  const fresh = days.flatMap((d) => d.sessions.filter((x) => !x.repeat).flatMap((x) => x.groups.flatMap((g) => g.items)));
+  const again = days.flatMap((d) => d.sessions.filter((x) => x.repeat).flatMap((x) => x.groups.flatMap((g) => g.items)));
+  const all = [...fresh, ...again];
+  const done = all.filter((it) => lc[lcSlug(it)]).length;
+  const newSessions = days.flatMap((d) => d.sessions.filter((x) => !x.repeat));
+  const topics = [...new Set((newSessions.length ? newSessions : days.flatMap((d) => d.sessions)).flatMap((x) => x.groups.map((g) => g.topic)))];
+  return (
+    <div className="lc-week">
+      <div className="lc-week-theme"><span className="eyebrow">This week's track</span><b>{weekTheme(week)}</b></div>
+      <div className="lc-bd-stats">
+        {fresh.length > 0 && <span><b>{fresh.length}</b> new</span>}
+        {again.length > 0 && <span><b>{again.length}</b> re-solve{again.length === 1 ? "" : "s"}</span>}
+        {all.length > 0 && <span>~<b>{Math.round(estimate(all) / 60 * 10) / 10}</b> h total</span>}
+        {all.length > 0 && <span><b>{done}</b>/{all.length} solved</span>}
+        <span className="lc-mix">{diffMix(all).map(([d, n]) => <i key={d} className={`diff-${DIFF[d]}`}>{n} {DIFF[d]}</i>)}</span>
+      </div>
+      {topics.length > 0 && <div className="lc-bd-pats">{topics.map((t) => <span key={t} className={`tag ${isDpGroup(t) ? "dp" : ""}`}>{t}</span>)}</div>}
+    </div>
+  );
+}
+
 export function LeetCodeWeek({ week, onOpen }) {
   const lc = useLeetCode();
   const practice = usePractice();
   const [open, setOpen] = useState(true);
+  const [mode, setMode] = useState("day");
+  const [sel, setSel] = useState(todayIdx);
   const groups = LEETCODE[week] || [];
-  if (!groups.length) return null;
-  const { total, done } = countSolved(groups, lc);
+  const days = WEEK_SCHEDULE[week] || [];
+  const dayItems = days.flatMap((d) => allItems(d.sessions));
+  if (!groups.length && !dayItems.length) return null;
+  const counted = mode === "day" ? dayItems : groups.flatMap((g) => g.items);
+  const total = counted.length;
+  const done = counted.filter((it) => lc[lcSlug(it)]).length;
+  const day = days[sel];
   return (
     <section className="track prac lc" style={{ "--tc": "var(--t-mock)" }}>
-      <button className="track-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <span className="pill" style={{ background: "color-mix(in srgb, var(--t-mock) 12%, transparent)", color: "var(--t-mock)" }}>LeetCode</span>
-        <span className="muted small">{week >= 17 ? "Revision set — re-solve these" : "Problems for this week's topics"}</span>
+      <div className="track-head lc-head">
+        <button className="lc-head-btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+          <span className="pill" style={{ background: "color-mix(in srgb, var(--t-mock) 12%, transparent)", color: "var(--t-mock)" }}>LeetCode</span>
+          <span className="muted small">{mode === "day" ? "1–2 problems a day" : "Topic bank — optional extra practice"}</span>
+        </button>
+        {open && (
+          <div className="seg lc-mode" role="group" aria-label="View">
+            <button className={mode === "day" ? "on" : ""} aria-pressed={mode === "day"} onClick={() => setMode("day")}>Daily plan</button>
+            {groups.length > 0 && <button className={mode === "pattern" ? "on" : ""} aria-pressed={mode === "pattern"} onClick={() => setMode("pattern")}>Topic bank</button>}
+          </div>
+        )}
         <span className="count">{done}/{total}</span>
-        <span className={`chev ${open ? "open" : ""}`}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg></span>
-      </button>
-      {open && (
+        <button className={`chev ${open ? "open" : ""} lc-chev`} onClick={() => setOpen((o) => !o)} aria-label={open ? "Collapse" : "Expand"}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg></button>
+      </div>
+      {open && mode === "pattern" && (
         <div className="track-items lc-items">
           {groups.map((g) => (
             <div key={g.topic} className="lc-group">
               <div className="lc-topic eyebrow">{g.topic}</div>
               {g.items.map((it) => <LcRow key={it[0]} item={it} solved={lc[lcSlug(it)]} practice={practice} onOpen={onOpen} showBlind />)}
+            </div>
+          ))}
+        </div>
+      )}
+      {open && mode === "day" && (
+        <div className="track-items lc-items">
+          <WeekOverview week={week} days={days} lc={lc} />
+          <div className="lc-days" role="tablist" aria-label="Day">
+            {days.map((d, i) => {
+              const items = allItems(d.sessions);
+              const dn = items.filter((it) => lc[lcSlug(it)]).length;
+              return (
+                <button key={d.day} role="tab" aria-selected={i === sel} className={`${i === sel ? "on" : ""} ${items.length && dn === items.length ? "ok" : ""}`} onClick={() => setSel(i)}>
+                  <b>{d.day}{i === todayIdx() && <i className="today" title="Today" />}</b><span>{items.length ? `${dn}/${items.length}` : "rest"}</span>
+                </button>
+              );
+            })}
+          </div>
+          {day && <DayBreakdown day={day} lc={lc} />}
+          {day && !day.sessions.length && <p className="small muted" style={{ padding: "4px 10px 10px" }}>Rest day — no problems. {week >= 17 && week <= 24 ? "Skim your cheat sheet if you like." : ""}</p>}
+          {day && day.sessions.map((s, k) => (
+            <div key={k} className="lc-session">
+              <div className={`lc-session-h ${s.repeat ? "rep" : ""}`}>{s.repeat && "↻ "}{s.label}</div>
+              {s.groups.map((g) => (
+                <div key={g.topic} className="lc-group">
+                  <div className="lc-topic eyebrow">{g.topic}</div>
+                  {g.items.map((it) => <LcRow key={it[0]} item={it} solved={lc[lcSlug(it)]} practice={practice} onOpen={onOpen} showBlind />)}
+                </div>
+              ))}
             </div>
           ))}
         </div>
@@ -192,6 +281,44 @@ export const LC_CSS = `
   .lc-sec-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:8px; }
   .lc-sec-head h3 { font-size:17px; }
   .lc-sec .meter { margin-bottom:8px; }
+  .lc .lc-head { flex-wrap:wrap; }
+  .lc .lc-head-btn { display:flex; align-items:center; gap:10px; border:0; background:none; padding:0; cursor:pointer; text-align:left; }
+  .lc .lc-mode { margin-left:auto; }
+  .lc .lc-mode + .count { margin-left:8px; }
+  .lc .lc-chev { border:0; background:none; padding:0; cursor:pointer; }
+  .lc-week { display:grid; gap:8px; margin:6px 4px 8px; padding:12px 14px; border-radius:12px; background:color-mix(in srgb, var(--t-mock) 6%, var(--bg)); border:1px solid var(--line); }
+  .lc-week-theme { display:grid; gap:2px; } .lc-week-theme .eyebrow { font-size:11px; } .lc-week-theme b { font-family:var(--f-display); font-stretch:108%; font-size:16px; }
+  .lc-grid-wrap { overflow-x:auto; padding:6px 4px 10px; }
+  .lc-grid { border-collapse:separate; border-spacing:3px; width:100%; min-width:560px; font-size:13px; }
+  .lc-grid th { font-family:var(--f-mono); font-weight:500; font-size:11px; color:var(--muted); text-align:center; text-transform:uppercase; letter-spacing:.06em; }
+  .lc-grid th:first-child { text-align:left; }
+  .lc .lc-grid th button { border:0; background:none; font:inherit; color:inherit; cursor:pointer; padding:2px 6px; border-radius:6px; }
+  .lc .lc-grid th button.on { background:var(--accent-soft); color:var(--accent); }
+  .lc-grid td { text-align:center; height:30px; border-radius:7px; background:var(--surface-2); cursor:pointer; white-space:nowrap; }
+  .lc-grid td:first-child { text-align:left; background:none; cursor:default; font-weight:500; padding-right:10px; white-space:normal; min-width:150px; }
+  .lc-grid td:last-child { background:none; cursor:default; color:var(--muted); }
+  .lc-grid td.dp { color:var(--t-dp); }
+  .lc-grid td.sel { outline:1.5px solid var(--accent); }
+  .lc-grid td.ok { background:var(--good-soft); }
+  .lc-grid .cnt { font-family:var(--f-mono); font-weight:600; color:var(--ink); }
+  .lc-grid .cnt.rep { color:var(--muted); font-weight:500; margin-left:4px; font-size:12px; }
+  .lc-days { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:6px; padding:4px; }
+  .lc .lc-days button { display:flex; flex-direction:column; align-items:center; gap:1px; padding:8px 2px; border-radius:10px; border:1px solid var(--line); background:var(--bg); cursor:pointer; }
+  .lc .lc-days button b { font-size:13.5px; display:inline-flex; align-items:center; gap:4px; }
+  .lc .lc-days button span { font-family:var(--f-mono); font-size:11px; color:var(--muted); }
+  .lc .lc-days button.on { border-color:var(--accent); background:var(--accent-soft); }
+  .lc .lc-days button.ok span { color:var(--good); }
+  .lc-days .today { width:6px; height:6px; border-radius:50%; background:var(--accent); display:inline-block; }
+  .lc-breakdown { display:grid; gap:8px; margin:8px 4px 4px; padding:12px 14px; border-radius:12px; background:var(--bg); border:1px solid var(--line); }
+  .lc-breakdown > div:first-child { display:flex; align-items:baseline; gap:8px; }
+  .lc-bd-stats { display:flex; flex-wrap:wrap; gap:6px 16px; font-size:13.5px; color:var(--muted); }
+  .lc-bd-stats b { color:var(--ink); font-family:var(--f-mono); }
+  .lc-mix { display:inline-flex; gap:10px; } .lc-mix i { font-style:normal; font-family:var(--f-mono); font-size:12.5px; }
+  .lc-bd-pats { display:flex; flex-wrap:wrap; gap:6px; } .lc-bd-pats .tag.dp { color:var(--t-dp); }
+  .lc-session { margin-top:8px; }
+  .lc-session-h { margin:6px 10px 0; padding-top:8px; border-top:1px dashed var(--line); font-family:var(--f-mono); font-size:12px; font-weight:500; color:var(--accent); letter-spacing:.03em; }
+  .lc-session-h.rep { color:var(--muted); }
+  @media (max-width:620px){ .lc .lc-mode { margin-left:0; order:3; width:100%; } .lc-days button span { font-size:10px; } }
   .toggle { display:inline-flex; align-items:center; gap:8px; font-size:14px; color:var(--muted); cursor:pointer; }
   .toggle input { accent-color:var(--accent); width:16px; height:16px; }
 `;
